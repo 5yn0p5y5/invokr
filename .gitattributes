@@ -1,0 +1,9 @@
+﻿# Normalise line endings so the repo behaves the same on Windows, macOS and
+# Linux. Files are stored with LF and checked out with LF everywhere.
+* text=auto eol=lf
+
+# Never touch binary files.
+*.png binary
+*.jpg binary
+*.ico binary
+*.xpi binary
