@@ -1,0 +1,22 @@
+{
+  "host": "127.0.0.1",
+  "port": 8765,
+  "token": "REPLACE_WITH_THE_TOKEN_FROM_YOUR_CONFIG_JSON",
+  "library": "~/Music/invokr",
+  "output_template": "{artist} - {title}.{output-ext}",
+  "format": "m4a",
+  "bitrate": "disable",
+  "cookie_file": null,
+  "download_timeout_seconds": 900,
+  "provider_order": [
+    "itunes",
+    "deezer"
+  ],
+  "log_dir": "logs",
+  "review_ttl_minutes": 30,
+  "auto_accept": true,
+  "auto_accept_min_score": 85.0,
+  "auto_accept_min_title": 88.0,
+  "auto_accept_min_artist": 85.0,
+  "auto_accept_min_margin": 8.0
+}

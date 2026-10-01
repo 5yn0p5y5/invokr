@@ -1,0 +1,33 @@
+# --- secrets --------------------------------------------------------------
+# Created on first run and contains your bearer token. Never commit it.
+server/config.json
+
+# --- your data ------------------------------------------------------------
+# The archive index: your listening history and absolute file paths.
+server/*.db
+server/*.db-wal
+server/*.db-shm
+# Your downloaded audio, if you point `library` inside the project.
+library/
+logs/
+
+# --- runtime noise --------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Stray caches (some tools write these into the working directory).
+.cache
+.spotify-token-cache
+
+# Working directory used while a download is in flight.
+.invokr-tmp/
+.spauto-tmp/
+
+# spotDL save files, if you ever hand one to it.
+*.spotdl
+
+# Local scratch from development.
+icon-preview.png

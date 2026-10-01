@@ -1,0 +1,25 @@
+# invokr server dependencies
+#
+# Python 3.10 or newer is required (the code uses PEP 604 unions such as
+# `str | None`).
+#
+# ffmpeg is also required, but it is a system binary rather than a Python
+# package, so it is not listed here. See the README.
+
+fastapi>=0.103
+uvicorn>=0.23
+pydantic>=2.0
+
+# HTTP for the iTunes and Deezer catalogue lookups.
+requests>=2.31
+
+# Fuzzy title/artist matching when ranking candidates.
+rapidfuzz>=3.9
+
+# Writing tags and cover art into the downloaded files.
+mutagen>=1.47
+
+# These two break whenever YouTube changes something. Keep them current:
+#   python -m pip install --upgrade yt-dlp ytmusicapi
+yt-dlp>=2026.8.19
+ytmusicapi>=1.11

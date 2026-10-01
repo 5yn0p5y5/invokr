@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>invokr</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; width: 420px; background: #14161a; color: #e8eaed;
+         font: 13px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+  header { display: flex; align-items: baseline; gap: 8px; padding: 10px 12px;
+           border-bottom: 1px solid #23272e; }
+  header strong { font-size: 13.5px; }
+  .sub { color: #9aa0a6; font-size: 11.5px; }
+  #content { max-height: 460px; overflow: auto; padding: 12px; }
+  footer { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid #23272e; }
+  button { padding: 6px 11px; border-radius: 7px; border: 1px solid #2b2f36;
+           background: #23272e; color: #e8eaed; cursor: pointer; font: inherit; font-size: 12.5px; }
+  button.primary { background: #7c4dff; border-color: #7c4dff; color: #fff; font-weight: 600; }
+  button:hover { filter: brightness(1.12); }
+  .src { display: flex; gap: 10px; align-items: center; padding: 8px;
+         background: #1a1d22; border: 1px solid #2b2f36; border-radius: 9px; }
+  .src img { width: 64px; border-radius: 5px; flex: none; }
+  .card { display: flex; gap: 9px; align-items: center; padding: 7px 8px;
+          background: #1a1d22; border: 1px solid #2b2f36; border-radius: 9px; margin-top: 6px;
+          cursor: pointer; }
+  .card:hover { border-color: #4a515c; }
+  .card.sel { border-color: #7c4dff; background: #1f1b2e; }
+  .card input { flex: none; accent-color: #7c4dff; }
+  .card img { width: 44px; height: 44px; border-radius: 5px; object-fit: cover; flex: none; }
+  .card .ph { width: 44px; height: 44px; border-radius: 5px; background: #2b2f36; flex: none; }
+  .card .body { min-width: 0; flex: 1; }
+  .card .t { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .m { color: #9aa0a6; font-size: 11px; white-space: nowrap; overflow: hidden;
+             text-overflow: ellipsis; }
+  .tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 3px; }
+  .badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid #3a3f47;
+           color: #c8ccd2; }
+  .badge.warn { border-color: #8a5a12; color: #f0b357; }
+  .badge.ok { border-color: #2f6b3a; color: #7fd18f; }
+  .row { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .note { background: #3a2a12; border: 1px solid #6b4a1c; border-radius: 7px;
+          padding: 7px 9px; font-size: 11.5px; margin-top: 8px; }
+  .err { background: #3a1a1a; border: 1px solid #6b2020; }
+  details { margin-top: 12px; border-top: 1px solid #23272e; padding-top: 9px; }
+  summary { cursor: pointer; color: #c8ccd2; font-size: 12px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 9px 0; }
+  .grid2 label { font-size: 10.5px; color: #9aa0a6; }
+  input[type=text] { width: 100%; margin-top: 2px; padding: 5px 7px; background: #101216;
+      border: 1px solid #2b2f36; border-radius: 6px; color: #e8eaed; font: inherit; font-size: 12px; }
+  .artgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(58px, 1fr));
+             gap: 5px; margin-top: 7px; }
+  .artitem { padding: 0; border: 2px solid transparent; border-radius: 6px; background: none;
+             cursor: pointer; line-height: 0; }
+  .artitem img { width: 100%; display: block; border-radius: 4px; }
+  .artitem.sel { border-color: #7c4dff; }
+  .chosen { display: flex; gap: 8px; align-items: center; margin-top: 7px; }
+  .chosen img { width: 40px; height: 40px; border-radius: 5px; object-fit: cover; }
+  .spin { color: #9aa0a6; font-size: 12px; }
+</style>
+</head>
+<body>
+  <header>
+    <strong>invokr</strong>
+    <span id="sub" class="sub"></span>
+  </header>
+  <div id="content"><div class="spin">Loading…</div></div>
+  <footer>
+    <button id="settings" type="button">Settings</button>
+    <button id="refresh" type="button">Refresh</button>
+  </footer>
+  <script src="popup.js"></script>
+</body>
+</html>
