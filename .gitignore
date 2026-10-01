@@ -31,3 +31,10 @@ env/
 
 # Local scratch from development.
 icon-preview.png
+
+# --- extension signing ----------------------------------------------------
+# Build output from tools/sign-extension.ps1, plus the npx cache it uses.
+.npm-cache/
+web-ext-artifacts/
+# web-ext's record of the AMO upload, written inside the source directory.
+extension/.amo-upload-uuid
