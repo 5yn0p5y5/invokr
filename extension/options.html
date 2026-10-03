@@ -69,6 +69,24 @@
     tab option is easier for long lists and the artwork picker.
   </div>
 
+  <h2>Archive location</h2>
+  <div class="hint">
+    Where the server keeps everything: the music in <code>library/</code>, the
+    index in <code>db/</code>, logs in <code>logs/</code>. All three live inside
+    this one folder, so copying it moves the entire archive. This is a path on
+    the machine running the server, not on this one.
+  </div>
+
+  <label>Master folder (on the server)
+    <input id="root" type="text" placeholder="Z:\music">
+  </label>
+
+  <div class="row">
+    <button id="loadConfig">Load from server</button>
+    <button id="applyConfig">Apply on server</button>
+  </div>
+  <pre id="configout">Not loaded yet.</pre>
+
   <div class="row">
     <button id="save" class="primary">Save</button>
     <button id="test">Test connection</button>

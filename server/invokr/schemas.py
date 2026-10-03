@@ -59,6 +59,18 @@ class ChoiceRequest(BaseModel):
     choice: int = 0
 
 
+class SettingsRequest(BaseModel):
+    """
+    Change where the archive lives.
+
+    Only the master folder is settable: the library, database and log folders
+    are derived from it, which is what keeps the entire archive a single folder
+    that can be copied to another drive or another machine.
+    """
+
+    root: str
+
+
 class ManualMetadataRequest(BaseModel):
     """Hand-entered metadata, for tracks no catalogue carries."""
 

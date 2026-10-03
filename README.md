@@ -139,6 +139,10 @@ Open the extension's settings (click the toolbar icon → **Settings**) and past
 
 Press **Test connection**. It should say *Server reachable and ready.*
 
+Where the archive lives is a server setting rather than an extension one — the
+same settings page has an **Archive location** section when you want to move it
+off the default folder. See [the master folder](#the-master-folder).
+
 ---
 
 ## Using it
@@ -219,7 +223,10 @@ by **title and artist**.
 |---|---|---|
 | `host` / `port` | `127.0.0.1` / `8765` | Where the server listens |
 | `token` | generated | Shared secret; also goes in the extension settings |
-| `library` | `~/Music/invokr` | Where finished files land |
+| `root` | *(unset)* | **The master folder.** Everything below derives from it |
+| `library` | `<root>/library` | Where finished files land; set it only to override `root` |
+| `db` | `<root>/db/invokr.db` | The index; set it only to override `root` |
+| `log_dir` | `<root>/logs` | Logs; set it only to override `root` |
 | `output_template` | `{artist} - {title}.{output-ext}` | Filename template |
 | `format` | `m4a` | `m4a` keeps the source untouched |
 | `bitrate` | `disable` | `disable` = never re-encode |
@@ -227,10 +234,73 @@ by **title and artist**.
 | `provider_order` | `["itunes","deezer"]` | Metadata sources, in order |
 | `download_timeout_seconds` | `900` | Per-download ceiling |
 | `review_ttl_minutes` | `30` | How long a review stays valid |
+| `backup_interval_minutes` | `360` | Index snapshot cadence; `0` turns it off |
+| `backup_keep` | `7` | How many snapshots to keep |
 | `auto_accept*` | see below | When to skip the review step |
 
-`library` and `log_dir` accept `~` and environment variables, so
-`~/Music/invokr` and `%USERPROFILE%\Music\invokr` both work.
+Paths accept `~` and environment variables, so `~/Music/invokr` and
+`%USERPROFILE%\Music\invokr` both work.
+
+### The master folder
+
+One folder holds everything invokr owns:
+
+```
+Z:\music\
+├── library\     the audio
+├── db\          invokr.db, plus backups\
+└── logs\
+```
+
+Set `root` and those three follow it. Because nothing lives outside, the archive
+becomes a folder you can copy to another drive or machine and keep using — the
+only thing that changes is this one path.
+
+**Set it from the extension:** Settings → **Archive location** → *Load from
+server* to see the current layout, type the folder, **Apply on server**. The
+server validates before changing anything: the path has to be absolute, the drive
+or share has to be reachable, and the folder has to be creatable and writable —
+so a typo, or a NAS that is not mounted, is refused with a reason instead of
+being silently accepted. Editing `root` in `server/config.json` by hand works
+too, and both routes retire the per-path overrides above, which would otherwise
+quietly outrank `root`.
+
+Pointing the server at a new folder never moves or deletes files. If the new
+folder has no database yet and the old one does, the existing index is **copied**
+across (never moved), so a mistake here cannot lose the original.
+
+**Tracked paths are stored relative to the library**, so moving the archive
+normally needs nothing else. The exception is an index written by an earlier
+version, which holds absolute paths — after physically moving those files,
+re-point them once:
+
+```bash
+python import_library.py --rebase-from "/old/path/to/library"
+```
+
+A row is rewritten only when its recorded path genuinely starts with that old
+folder, so it never guesses which file was meant, and files that live outside the
+library are left alone. Plain `python import_library.py` also repairs this, by
+re-registering everything from its tags.
+
+#### On a network share
+
+Pointing `root` at a NAS works, with two things worth knowing:
+
+- **The journal switches itself.** SQLite's WAL mode assumes locking and
+  shared-memory behaviour that SMB and NFS do not provide, and a lock that
+  silently does nothing can corrupt a database. When the index lands on a network
+  path the server drops back to the rollback journal (`DELETE`) on its own.
+  `/api/health`, `/api/config` and the settings page all report which mode is in
+  use.
+- **Snapshots run on a timer.** Every `backup_interval_minutes` — and once at
+  startup when the index is on a share — the server writes a `VACUUM INTO`
+  snapshot into `<root>/db/backups/`, keeping the newest `backup_keep`. The index
+  is also rebuildable from the tags on disk, so it is never the only copy of
+  anything.
+
+Keep one server process as the only writer. Two servers sharing a database on a
+share is the case SQLite is genuinely bad at.
 
 ### Filename template variables
 
@@ -275,6 +345,8 @@ Everything under `/api/*` needs `Authorization: Bearer <token>`.
 |---|---|---|
 | `GET` | `/` | Liveness; no auth, leaks nothing |
 | `GET` | `/api/health` | Preflight: ffmpeg, library, database, providers |
+| `GET` | `/api/config` | Where the archive lives, and the storage decisions in force |
+| `PATCH` | `/api/config` | `{root}` — move the archive to a different master folder |
 | `POST` | `/api/review` | `{videoId, ytUrl?, title?, artists?, album?, durationSec?, force?}` |
 | `POST` | `/api/unlike` | `{videoId, title?}` — logged only, never deletes |
 | `GET` | `/api/reviews` | Reviews waiting for a decision |
@@ -320,6 +392,12 @@ falls back to badging the icon. Diagnostics reports `popup API` accordingly.
 **Nothing downloads, the server log says the job failed.**
 `http://127.0.0.1:8765/api/events` shows recent errors. Common causes: YouTube
 bot checks, a region-locked video, or a video that has been removed.
+
+**The archive looks empty after you moved it.**
+The index is still pointing at the old paths. Set the new master folder
+(Settings → **Archive location** → **Apply on server**), then re-point the rows
+recorded before the move, once: `python import_library.py --rebase-from
+"/old/path/to/library"`. See [the master folder](#the-master-folder).
 
 **`js_runtime` warning.**
 yt-dlp warns that YouTube extraction without a JavaScript runtime is deprecated.

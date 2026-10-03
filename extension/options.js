@@ -79,6 +79,107 @@ async function testConnection() {
   renderHealth(await response.json());
 }
 
+// --------------------------------------------------------- archive location
+
+// The master folder is server state, not an extension setting, so it has its
+// own load/apply pair rather than riding along with Save.
+
+function renderConfig(config) {
+  const lines = [
+    line("master folder", config.root || "(not set — legacy layout)"),
+    line("library", config.library),
+    line("database", config.database),
+    line("logs", config.logs),
+    line(
+      "journal mode",
+      `${config.database_journal} on ${
+        config.database_on_network ? "a network share" : "a local disk"
+      }`
+    ),
+    line("last backup", config.latest_backup || "(none yet)"),
+  ];
+
+  if (config.database_copied_from) {
+    lines.push("");
+    lines.push(`The existing index was copied from ${config.database_copied_from}`);
+    lines.push("and the original was left where it was.");
+  }
+
+  $("configout").className = "ok";
+  $("configout").textContent = lines.join("\n");
+}
+
+async function configRequest(method, body) {
+  const serverUrl =
+    $("serverUrl").value.trim().replace(/\/+$/, "") || DEFAULTS.serverUrl;
+  const token = $("token").value.trim();
+
+  const response = await fetch(`${serverUrl}/api/config`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      detail = (await response.json()).detail || detail;
+    } catch (error) {
+      // Response was not JSON; the status is all we have.
+    }
+    if (response.status === 401) detail = "the server rejected the token";
+    throw new Error(detail);
+  }
+
+  return response.json();
+}
+
+function configFailed(message) {
+  $("configout").className = "bad";
+  $("configout").textContent = message;
+}
+
+async function loadConfig() {
+  $("configout").className = "";
+  $("configout").textContent = "Asking the server…";
+  try {
+    const config = await configRequest("GET");
+    if (config.root) $("root").value = config.root;
+    renderConfig(config);
+  } catch (error) {
+    configFailed(`Could not read the server's settings.\n\n${error.message}`);
+  }
+}
+
+async function applyConfig() {
+  const root = $("root").value.trim();
+  if (!root) {
+    configFailed(
+      "Enter the master folder first — an absolute path on the machine running " +
+        "the server, such as Z:\\music or D:\\Music\\invokr."
+    );
+    return;
+  }
+
+  $("configout").className = "";
+  $("configout").textContent = `Pointing the server at ${root}…`;
+  try {
+    renderConfig(await configRequest("PATCH", { root }));
+    $("status").className = "ok";
+    $("status").textContent =
+      "Archive location updated. Nothing was moved or deleted — the server just " +
+      "reads and writes there from now on.";
+  } catch (error) {
+    configFailed(
+      `The server refused that folder.\n\n${error.message}\n\n` +
+        "Nothing was changed."
+    );
+  }
+}
+
 // --------------------------------------------------------------- diagnostics
 
 function renderDiag(text) {
@@ -265,4 +366,6 @@ $("save").addEventListener("click", save);
 $("test").addEventListener("click", testConnection);
 $("diag").addEventListener("click", runDiagnostics);
 $("testlike").addEventListener("click", sendTestLike);
+$("loadConfig").addEventListener("click", loadConfig);
+$("applyConfig").addEventListener("click", applyConfig);
 load();

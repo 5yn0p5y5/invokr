@@ -16,6 +16,7 @@ Three tables:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -73,6 +74,15 @@ CREATE INDEX IF NOT EXISTS idx_events_at ON events (at);
 """
 
 _db_path: Path | None = None
+# The library root that stored paths are kept relative to. None means this
+# install has no master folder, and paths are stored exactly as given.
+_root: Path | None = None
+# WAL is right on a local disk and wrong on a network share: SMB and NFS do not
+# provide the locking and shared-memory semantics WAL assumes, and a lock that
+# silently does nothing can corrupt the database. On a network path we fall back
+# to the rollback journal.
+_journal_mode: str = "WAL"
+_on_network: bool = False
 
 # Columns added after the first release. CREATE TABLE IF NOT EXISTS will not
 # alter an existing table, so additive changes need an explicit migration.
@@ -95,11 +105,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
-def configure(path: Path) -> None:
-    """Point the module at a database file and create or migrate the schema."""
-    global _db_path
+def configure(path: Path, *, library_root: Path | None = None) -> None:
+    """
+    Point the module at a database file and create or migrate the schema.
+
+    ``library_root`` is the folder that stored track paths are kept relative to,
+    which is what lets the whole archive move to another drive or machine
+    without rewriting every row.
+    """
+    global _db_path, _root, _journal_mode, _on_network
     _db_path = Path(path)
+    _root = Path(library_root) if library_root else None
     _db_path.parent.mkdir(parents=True, exist_ok=True)
+    _on_network = is_network_path(_db_path)
+    _journal_mode = "DELETE" if _on_network else "WAL"
     with connect() as conn:
         conn.executescript(SCHEMA)
         _migrate(conn)
@@ -113,7 +132,7 @@ def connect() -> Iterator[sqlite3.Connection]:
 
     conn = sqlite3.connect(_db_path, timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA journal_mode={_journal_mode}")
     conn.execute("PRAGMA synchronous=NORMAL")
     try:
         yield conn
@@ -123,6 +142,97 @@ def connect() -> Iterator[sqlite3.Connection]:
         raise
     finally:
         conn.close()
+
+
+def journal_mode() -> str:
+    """The journal actually in use — reported by preflight and /api/config."""
+    return _journal_mode
+
+
+def on_network_path() -> bool:
+    return _on_network
+
+
+def is_network_path(path: Path) -> bool:
+    """
+    Is this path on a network share?
+
+    On Windows a mapped drive reports DRIVE_REMOTE even while the share is
+    disconnected, so an unreachable ``Z:`` is still recognised. Elsewhere,
+    ``/proc/mounts`` names the filesystem type.
+    """
+    text = str(path)
+    if text.startswith("\\\\") or text.startswith("//"):
+        return True
+
+    if os.name == "nt":
+        drive = os.path.splitdrive(text)[0]
+        if not drive:
+            return False
+        try:
+            import ctypes
+
+            return ctypes.windll.kernel32.GetDriveTypeW(drive + "\\") == 4
+        except Exception:
+            return False
+
+    try:
+        mounts = Path("/proc/mounts").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+
+    network_fs = {"nfs", "nfs4", "cifs", "smbfs", "smb3", "afp", "fuse.sshfs", "9p"}
+    target = Path(text).resolve()
+    best_len, best_fs = -1, ""
+    for line in mounts:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mount_point = Path(parts[1].replace("\\040", " "))
+        if target == mount_point or mount_point in target.parents:
+            if len(str(mount_point)) > best_len:
+                best_len, best_fs = len(str(mount_point)), parts[2]
+
+    return best_fs in network_fs
+
+
+# ------------------------------------------------------- stored track paths ---
+#
+# Paths are persisted relative to the library root when they sit inside it, so
+# copying the master folder to another drive or machine keeps the index valid.
+# A file that lives outside the library stays absolute, which is the only thing
+# that could sensibly be meant by it.
+
+
+def _to_stored(path: str | None) -> str | None:
+    """Filesystem path -> what we persist."""
+    if not path or _root is None:
+        return path
+    try:
+        return str(Path(path).resolve().relative_to(_root))
+    except ValueError:
+        return str(path)
+
+
+def _to_absolute(stored: str | None) -> str | None:
+    """What we persist -> a path usable on this machine."""
+    if not stored:
+        return stored
+    candidate = Path(stored)
+    if candidate.is_absolute() or _root is None:
+        return str(candidate)
+    return str(_root / candidate)
+
+
+def _row(row) -> dict:
+    data = dict(row)
+    if "path" in data:
+        data["path"] = _to_absolute(data.get("path"))
+    return data
+
+
+def _rows(rows) -> list[dict]:
+    return [_row(row) for row in rows]
 
 
 # --------------------------------------------------------------------- events
@@ -162,7 +272,7 @@ def get_track(spotify_id: str) -> dict | None:
         row = conn.execute(
             "SELECT * FROM tracks WHERE spotify_id = ?", (spotify_id,)
         ).fetchone()
-    return dict(row) if row else None
+    return _row(row) if row else None
 
 
 def find_track_by_video(video_id: str) -> dict | None:
@@ -171,7 +281,7 @@ def find_track_by_video(video_id: str) -> dict | None:
             "SELECT * FROM tracks WHERE video_id = ? ORDER BY updated_at DESC LIMIT 1",
             (video_id,),
         ).fetchone()
-    return dict(row) if row else None
+    return _row(row) if row else None
 
 
 def downloaded_path(spotify_id: str) -> str | None:
@@ -181,15 +291,15 @@ def downloaded_path(spotify_id: str) -> str | None:
             "SELECT path FROM tracks WHERE spotify_id = ? AND status = 'done'",
             (spotify_id,),
         ).fetchone()
-    return row["path"] if row else None
+    return _to_absolute(row["path"]) if row else None
 
 
 def track_by_path(path: str) -> dict | None:
     with connect() as conn:
         row = conn.execute(
-            "SELECT * FROM tracks WHERE path = ?", (path,)
+            "SELECT * FROM tracks WHERE path = ?", (_to_stored(path),)
         ).fetchone()
-    return dict(row) if row else None
+    return _row(row) if row else None
 
 
 def find_archived_by_title_artist(title: str, artist: str) -> dict | None:
@@ -216,10 +326,10 @@ def find_archived_by_title_artist(title: str, artist: str) -> dict | None:
         if normalise(row["title"] or "") != want_title:
             continue
         if not want_artist:
-            return dict(row)
+            return _row(row)
         stored = [part.strip() for part in (row["artists"] or "").split(",")]
         if any(normalise(part) == want_artist for part in stored if part):
-            return dict(row)
+            return _row(row)
     return None
 
 
@@ -262,7 +372,7 @@ def register_imported(
                 artists,
                 album,
                 duration_s,
-                path,
+                _to_stored(path),
                 json.dumps(detail or {}, default=str),
                 now,
                 now,
@@ -332,7 +442,7 @@ def set_track_status(
                 updated_at = ?
             WHERE spotify_id = ?
             """,
-            (status, path, error, 1 if bump_attempts else 0, utcnow(), spotify_id),
+            (status, _to_stored(path), error, 1 if bump_attempts else 0, utcnow(), spotify_id),
         )
 
 
@@ -341,7 +451,7 @@ def all_tracks(limit: int = 200) -> list[dict]:
         rows = conn.execute(
             "SELECT * FROM tracks ORDER BY updated_at DESC LIMIT ?", (limit,)
         ).fetchall()
-    return [dict(row) for row in rows]
+    return _rows(rows)
 
 
 # ----------------------------------------------------------------------- jobs
@@ -379,14 +489,14 @@ def update_job(
                             error = ?, updated_at = ?
             WHERE job_id = ?
             """,
-            (status, path, error, utcnow(), job_id),
+            (status, _to_stored(path), error, utcnow(), job_id),
         )
 
 
 def get_job(job_id: str) -> dict | None:
     with connect() as conn:
         row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
-    return dict(row) if row else None
+    return _row(row) if row else None
 
 
 def recent_jobs(limit: int = 20) -> list[dict]:
@@ -394,7 +504,7 @@ def recent_jobs(limit: int = 20) -> list[dict]:
         rows = conn.execute(
             "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
         ).fetchall()
-    return [dict(row) for row in rows]
+    return _rows(rows)
 
 
 def claim_next_job() -> dict | None:
@@ -415,7 +525,7 @@ def claim_next_job() -> dict | None:
             "UPDATE jobs SET status = 'downloading', updated_at = ? WHERE job_id = ?",
             (utcnow(), row["job_id"]),
         )
-    return dict(row)
+    return _row(row)
 
 
 def requeue_stale_jobs() -> int:
@@ -440,3 +550,101 @@ def queue_depth() -> dict[str, int]:
             "SELECT status, COUNT(*) AS n FROM jobs GROUP BY status"
         ).fetchall()
     return {row["status"]: row["n"] for row in rows}
+
+
+# ------------------------------------------------------------------ backups ---
+#
+# On a network share the database cannot lean on WAL's locking, so a consistent
+# snapshot is cheap insurance: VACUUM INTO writes a compacted copy and is safe
+# to run against a live database. The archive is also rebuildable from the tags
+# on disk (see import_library.py), so even a lost database is recoverable.
+
+
+def snapshot_to(destination: Path) -> Path:
+    """Write a consistent copy of the database to a specific file."""
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        destination.unlink()
+    with connect() as conn:
+        conn.execute("VACUUM INTO ?", (str(destination),))
+    return destination
+
+
+def backup(keep: int = 7) -> Path | None:
+    """
+    Snapshot into ``backups/`` beside the database, keeping the newest ``keep``.
+
+    Returns the snapshot path, or None when there is nothing to copy yet.
+    """
+    if _db_path is None or not _db_path.exists():
+        return None
+
+    folder = _db_path.parent / "backups"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    target = folder / f"{_db_path.stem}-{stamp}.db"
+    if target.exists():
+        # Already snapshotted within this second; VACUUM INTO cannot overwrite.
+        return target
+    snapshot_to(target)
+    _prune_backups(folder, _db_path.stem, keep)
+    return target
+
+
+def _prune_backups(folder: Path, stem: str, keep: int) -> None:
+    if keep <= 0:
+        return
+    snapshots = sorted(folder.glob(f"{stem}-*.db"), key=lambda p: p.name, reverse=True)
+    for stale in snapshots[keep:]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
+def latest_backup() -> Path | None:
+    if _db_path is None:
+        return None
+    folder = _db_path.parent / "backups"
+    snapshots = sorted(folder.glob(f"{_db_path.stem}-*.db"), key=lambda p: p.name)
+    return snapshots[-1] if snapshots else None
+
+
+# ------------------------------------------------------------ relocating -----
+
+
+def rebase_paths(old_root: str | Path) -> int:
+    """
+    Re-point recorded paths after the archive has been physically moved.
+
+    A row is rewritten only when its stored path genuinely starts with
+    ``old_root``, so this is deterministic: it never guesses which file was
+    meant. Rows pointing outside the library are left alone, and nothing is
+    checked on disk — the caller is asserting the move already happened.
+
+    Rows already stored relative need no help; they follow the folder by
+    definition. Returns the number of rows updated.
+    """
+    if _root is None:
+        raise RuntimeError("configure() with library_root before rebasing")
+
+    prefix = Path(old_root)
+    updated = 0
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT spotify_id, path FROM tracks WHERE path IS NOT NULL AND path != ''"
+        ).fetchall()
+        for row in rows:
+            stored = Path(row["path"])
+            if not stored.is_absolute():
+                continue
+            try:
+                tail = stored.relative_to(prefix)
+            except ValueError:
+                continue
+            conn.execute(
+                "UPDATE tracks SET path = ?, updated_at = ? WHERE spotify_id = ?",
+                (_to_stored(_root / tail), utcnow(), row["spotify_id"]),
+            )
+            updated += 1
+    return updated

@@ -110,12 +110,22 @@ def check_database(cfg: Config) -> dict:
     try:
         from . import db
 
-        db.configure(path)
+        db.configure(path, library_root=cfg.library_path)
         depth = db.queue_depth()
     except Exception as exc:  # noqa: BLE001
         return _result("database", False, f"{path}: {exc}")
     summary = ", ".join(f"{k}={v}" for k, v in sorted(depth.items())) or "empty"
-    return _result("database", True, f"{path} ({summary})")
+    detail = f"{path} ({summary})"
+
+    # Say the network case out loud: it is the reason the journal is not WAL.
+    if db.on_network_path():
+        detail += f" [network share, journal={db.journal_mode()}]"
+
+    latest = db.latest_backup()
+    if latest:
+        detail += f" [backup {latest.name}]"
+
+    return _result("database", True, detail)
 
 
 def check_provider_health(cfg: Config) -> list[dict]:

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -21,12 +22,13 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from . import __version__, db, library, native, preflight, review, worker
 from .catalog import Catalog, clean_title, decide, search_artwork
-from .config import CONFIG
+from .config import CONFIG, validate_directory
 from .schemas import (
     ChoiceRequest,
     LibraryImportRequest,
     ManualMetadataRequest,
     ReviewRequest,
+    SettingsRequest,
     UnlikeRequest,
 )
 
@@ -34,6 +36,23 @@ logger = logging.getLogger("invokr")
 
 _worker_thread = None
 _worker_stop = None
+
+
+def _backup_loop(stop: threading.Event, interval_minutes: int, keep: int) -> None:
+    """
+    Snapshot the database on a timer.
+
+    VACUUM INTO is safe against a live database, so this never blocks a
+    download and never needs the server stopped.
+    """
+    while not stop.wait(interval_minutes * 60):
+        try:
+            path = db.backup(keep=keep)
+            if path is not None:
+                logger.info("database snapshot written to %s", path)
+                db.record_event("db_backup", detail={"path": str(path)})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("database snapshot failed: %s", exc)
 
 
 @asynccontextmanager
@@ -44,7 +63,7 @@ async def lifespan(_: FastAPI):
         level=logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
-    db.configure(CONFIG.db_path)
+    db.configure(CONFIG.db_path, library_root=CONFIG.library_path)
     requeued = db.requeue_stale_jobs()
     db.record_event(
         "server_start",
@@ -52,11 +71,39 @@ async def lifespan(_: FastAPI):
     )
 
     _worker_thread, _worker_stop = worker.start(CONFIG)
+
+    if db.on_network_path() and CONFIG.backup_keep > 0:
+        # The database is on a share, where locking is weaker than SQLite
+        # assumes, so take a snapshot now rather than waiting out the interval.
+        try:
+            snapshot = db.backup(keep=CONFIG.backup_keep)
+            logger.info("startup snapshot on network share: %s", snapshot)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("startup snapshot failed: %s", exc)
+
+    _backup_stop = None
+    if CONFIG.backup_interval_minutes > 0:
+        _backup_stop = threading.Event()
+        threading.Thread(
+            target=_backup_loop,
+            args=(_backup_stop, CONFIG.backup_interval_minutes, CONFIG.backup_keep),
+            name="invokr-backup",
+            daemon=True,
+        ).start()
+
     logger.info("invokr %s listening on %s:%s", __version__, CONFIG.host, CONFIG.port)
+    logger.info(
+        "library %s | database %s (%s)",
+        CONFIG.library_path,
+        CONFIG.db_path,
+        db.journal_mode(),
+    )
 
     try:
         yield
     finally:
+        if _backup_stop is not None:
+            _backup_stop.set()
         if _worker_stop is not None:
             _worker_stop.set()
         if _worker_thread is not None:
@@ -681,3 +728,71 @@ def api_job_cancel(job_id: str, _: None = Depends(require_token)) -> dict:
         "job_cancelled", video_id=job["video_id"], detail={"job_id": job_id}
     )
     return {"cancelled": True, "jobId": job_id}
+
+
+# ------------------------------------------------------------- settings ------
+
+
+def _config_view() -> dict:
+    """The public config, plus what the storage layer actually decided."""
+    view = CONFIG.public()
+    view["database_journal"] = db.journal_mode()
+    view["database_on_network"] = db.on_network_path()
+    latest = db.latest_backup()
+    view["latest_backup"] = str(latest) if latest else None
+    return view
+
+
+@app.get("/api/config")
+def api_get_config(_: None = Depends(require_token)) -> dict:
+    """Where the archive lives right now, for the extension's settings page."""
+    return _config_view()
+
+
+@app.patch("/api/config")
+def api_update_config(
+    payload: SettingsRequest, _: None = Depends(require_token)
+) -> dict:
+    """
+    Move the archive to a different master folder.
+
+    Nothing on disk is moved: this changes where the server reads and writes
+    from here on. If the new folder has no database yet and the old one does,
+    the existing index is copied across so the archive stays whole — copy, never
+    move, so a mistake here cannot lose the original.
+    """
+    resolved, error = validate_directory(payload.root)
+    if error:
+        raise HTTPException(status_code=422, detail=error)
+    assert resolved is not None
+
+    previous_root = CONFIG.root_path
+    previous_db = CONFIG.db_path
+
+    CONFIG.adopt_root(str(resolved))
+    new_db = CONFIG.db_path
+
+    copied_from = None
+    if new_db != previous_db and previous_db.exists() and not new_db.exists():
+        db.snapshot_to(new_db)
+        copied_from = previous_db
+
+    db.configure(new_db, library_root=CONFIG.library_path)
+    db.record_event(
+        "config_changed",
+        detail={
+            "root": str(resolved),
+            "previous_root": str(previous_root) if previous_root else None,
+            "database_copied_from": str(copied_from) if copied_from else None,
+        },
+    )
+    logger.info(
+        "master folder set to %s (database %s%s)",
+        resolved,
+        new_db,
+        f", copied from {copied_from}" if copied_from else "",
+    )
+
+    view = _config_view()
+    view["database_copied_from"] = str(copied_from) if copied_from else None
+    return view

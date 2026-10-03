@@ -4,6 +4,7 @@ Register files you already have, so the extension stops re-downloading them.
     python import_library.py                                  # scan the library folder
     python import_library.py --path "D:\\Music"                # scan somewhere else
     python import_library.py --path "D:\\Music" --dry-run      # report only
+    python import_library.py --rebase-from "D:\\Old\\library"  # after moving the archive
 
 Reads the comment tag and freeform atoms, so files written by spotDL are
 identified exactly (YouTube URL in the comment, Spotify URL in WOAS) rather than
@@ -34,9 +35,36 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--no-recursive", action="store_true", help="do not descend into subfolders"
     )
+    parser.add_argument(
+        "--rebase-from",
+        default=None,
+        metavar="OLD_LIBRARY",
+        help="after moving the archive, rewrite recorded paths that start with "
+        "this old library folder so they point inside the current one",
+    )
     args = parser.parse_args(argv)
 
-    db.configure(CONFIG.db_path)
+    db.configure(CONFIG.db_path, library_root=CONFIG.library_path)
+
+    if args.rebase_from:
+        # Paths recorded before a move are still absolute. Nothing is touched on
+        # disk: this only re-points the index at where the files now live.
+        rows = db.rebase_paths(args.rebase_from)
+        db.record_event(
+            "paths_rebased",
+            detail={
+                "from": args.rebase_from,
+                "to": str(CONFIG.library_path),
+                "rows": rows,
+            },
+        )
+        print(
+            f"rewrote {rows} recorded path(s)\n"
+            f"  from {args.rebase_from}\n"
+            f"  to   {CONFIG.library_path}",
+            file=sys.stderr,
+        )
+        return 0
 
     root = Path(args.path) if args.path else CONFIG.library_path
     if not root.exists():
