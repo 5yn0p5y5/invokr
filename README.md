@@ -21,7 +21,6 @@ exact video you liked.
 - [Configuration](#configuration)
 - [HTTP API](#http-api)
 - [Troubleshooting](#troubleshooting)
-- [Releasing](#releasing)
 - [Design notes](#design-notes)
 - [Responsible use](#responsible-use)
 
@@ -135,8 +134,7 @@ because nothing leaves your machine.
 > Working on the code instead? `about:debugging#/runtime/this-firefox` →
 > **Load Temporary Add-on…** → pick `extension/manifest.json` for
 > edit-and-reload with no packaging. That path is disposable by design: Firefox
-> drops temporary add-ons the moment it restarts. To turn your own source into a
-> permanent build, see [Releasing](#releasing).
+> drops temporary add-ons the moment it restarts.
 
 ### 4. Connect them
 
@@ -446,91 +444,6 @@ recorded before the move, once: `python import_library.py --rebase-from
 yt-dlp warns that YouTube extraction without a JavaScript runtime is deprecated.
 Downloads work without one, but installing
 [Deno](https://deno.land/) removes the risk of some formats going missing.
-
----
-
-## Releasing
-
-People install invokr from a signed `.xpi` attached to a GitHub release, so
-signing is part of the release rather than an optional nicety. Firefox release
-builds only install add-ons that carry a Mozilla signature, and there is no
-local equivalent — `about:debugging` can never survive a restart.
-
-1. Bump `version` in `extension/manifest.json`. AMO refuses a version number it
-   has already seen, so this is not optional.
-
-2. Sign, from the repository root:
-
-   ```powershell
-   .\tools\sign-extension.ps1
-   ```
-
-   ```bash
-   npx web-ext sign --source-dir=extension --channel=unlisted
-   ```
-
-   The script lints first, because AMO rejects whatever lint errors on. It leaves
-   two files in `web-ext-artifacts/`: AMO's own `<record-id>-<version>.xpi`,
-   named after AMO's internal add-on record, and a release-ready
-   `invokr-<version>.xpi`.
-
-   If your execution policy refuses the unsigned script, bypass it for this one
-   run: `powershell -ExecutionPolicy Bypass -File tools\sign-extension.ps1`.
-
-3. Attach `web-ext-artifacts/invokr-<version>.xpi` to a GitHub release tagged
-   `v<version>`. Renaming is safe — the signature covers the contents of the
-   archive, not its name — but keep the `.xpi` extension, or Firefox will treat
-   the file as a zip archive instead of an add-on. GitHub serves release assets
-   as downloads rather than add-on installs, so users open the downloaded file
-   to install it.
-
-4. **Restart the server too.** The extension and the server are installed
-   separately, so it is easy to end up with a new extension talking to a server
-   process that is days old. Nothing breaks — the panel says the server is an
-   older build instead of failing — but any endpoint added in the release only
-   exists after the server is restarted, so likes appear to stop being accepted
-   while `/api/review` is in fact working fine.
-
-   To tell the two apart, ask the server for the route directly: a route that
-   does not exist answers `404`, while one that merely wants a token answers
-   `401`. `GET /` reports a version, but it is the source version and does not
-   change per build, so it cannot identify which process is running.
-
-   ```bash
-   curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8765/api/failures
-   ```
-
-### AMO credentials
-
-Unlisted signing is self-distribution: AMO signs automatically, with no listing
-and no human review. You need API credentials once:
-
-1. Create a free account at [addons.mozilla.org](https://addons.mozilla.org),
-   then generate credentials at
-   <https://addons.mozilla.org/developers/addon/api/key/>. The **JWT issuer** is
-   the API key; the **JWT secret** is the secret.
-
-2. Store them in your user environment — not in the repository, and not in your
-   shell history:
-
-   ```powershell
-   [Environment]::SetEnvironmentVariable('WEB_EXT_API_KEY','user:12345:67890','User')
-   [Environment]::SetEnvironmentVariable('WEB_EXT_API_SECRET','<jwt-secret>','User')
-   ```
-
-   ```bash
-   # bash / zsh — put these in ~/.profile to keep them
-   export WEB_EXT_API_KEY='user:12345:67890'
-   export WEB_EXT_API_SECRET='<jwt-secret>'
-   ```
-
-Re-signing keeps the add-on ID `invokr@localhost`, so a new build installs over
-the old one and keeps its settings — server URL and bearer token included.
-
-Unlisted add-ons do not update themselves. To get that, host an
-[update manifest](https://extensionworkshop.com/documentation/manage/updating-your-extension/)
-and point `browser_specific_settings.gecko.update_url` at it; without one, an
-installed build stays put until the user installs a newer release.
 
 ---
 
