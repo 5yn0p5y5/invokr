@@ -250,3 +250,104 @@ const emit = (e) => browser.runtime.sendMessage(e);   // background → browser.
 | Firefox 128+ supports `world: "MAIN"` in MV3 | **High** — Mozilla blog + MDN |
 | LIKE vs "Save to library" are different operations | **High** — distinct ytmusicapi endpoints |
 | `ytmusic-player-bar` class also on `.title`/`.byline`/`.time-info` nodes | Medium — two independent userscripts agree, no official doc |
+
+---
+
+## 7. What shipped, and where this brief was wrong
+
+Written after the 0.6.0 detection rework, from a diagnostics dump that showed a
+like producing **no event at all** while the toast said "Saved to liked music".
+
+**§Coverage notes were right and the implementation ignored them.** The brief
+recommended sniffing `XMLHttpRequest`/`fetch` in a MAIN-world script for
+"highest coverage". The shipped extension instead relied on
+`webRequest.onBeforeRequest` with `["requestBody"]`, and that path never once
+produced a video id. Two facts explain it:
+
+- `WebRequestUpload.createRequestBody` returns `{ formData }` with **no** `raw`
+  bytes as soon as the body parses as form encoded, and `{ raw }` otherwise. A
+  reader that only looks at `raw[0].bytes` therefore sees nothing for a whole
+  class of requests. ([source](https://searchfox.org/mozilla-central/source/toolkit/components/extensions/webrequest/WebRequestUpload.sys.mjs))
+- The rest of the `requestBody` plumbing (`channel instanceof Ci.nsIUploadChannel`,
+  a seekable upload stream) is not guaranteed for every request either, and
+  `onBeforeRequest` gets `requestBody` as `undefined` rather than an error when
+  it is unavailable.
+
+So the brief's claim that request interception "cannot fail silently the way a
+DOM observer can" is exactly backwards in this browser. `extension/ytm-net.js`
+now does the sniffing from inside the page, where the body is always readable.
+
+**The `like-status` failure mode the brief did not list.** §6.5 covers Polymer
+rewriting the attribute with the *same* value, and §6.1 covers reading
+`videoId` in the same tick. It misses the inverse: because Polymer writes the
+attribute **only when the value changes**, a track that starts `INDIFFERENT` —
+following another `INDIFFERENT` track — produces no mutation at all. Any
+detector that treats "first value seen for this video id" as a baseline then
+swallows the user's own like as pre-existing state. That is a silent drop on
+the most ordinary interaction there is, and it is the one that was costing
+roughly one like in five.
+
+The fixes that actually matter, in order:
+
+1. **Baseline eagerly, not lazily.** A 1 s poll records the current track's
+   `like-status` before the user can touch it. §6.1's "read both in the same
+   tick" is necessary but not sufficient.
+2. **Use the click's capture phase.** A document-level capture listener
+   observes the pre-click `like-status` before YouTube Music's own handler
+   runs, which is the only cheap way to know the baseline for a track the poll
+   has not seen yet.
+3. **Confirm before reporting.** A flip is held for ~300 ms and re-read; if the
+   `videoId` changed in the meantime, the rewrite belonged to a re-purposed
+   renderer and is discarded. Without this, a track change emits a spurious
+   un-like for the previous song.
+4. **Never charge an unattributable event to the playing track.** When
+   `webRequest` sees a like whose body cannot be read, it is dropped and
+   counted, not guessed at — guessing would download the wrong song for every
+   playlist-row like.
+
+### 7.1 Track identity must not come from the URL
+
+The shipped detector originally resolved the playing video from, in order, a
+`watch?v=` link inside `ytmusic-player-bar`, then `window.location.href`. On a
+browse page — Home, a playlist, search results — **the URL has no `?v=` at all**,
+and if the player bar is collapsed its title may not be a link either. Both
+sources then return nothing, `readTrack()` yields `videoId: null`, and every
+`sync` returns at its first guard. The like is never reported, and the failure
+is invisible: no error, no counter, just silence.
+
+`#movie_player` is the answer, and §3 already said so — `getVideoData()` returns
+`{video_id, title, author}`, which is exactly the identity plus metadata the
+player bar may not be rendering. It has to be read from the page world, which is
+what `ytm-net.js` is for, so the MAIN-world script now also announces the current
+track to the isolated one whenever it changes. The URL is the last resort rather
+than the second.
+
+The takeaway generalises: **any identifier read from the address bar is a
+browse-page bug waiting to happen.** A single-page app changes its URL for many
+reasons and only sometimes encodes the thing you care about.
+
+### 7.2 `event.source !== window` is a silent killer
+
+The page-to-content bridge used the textbook guard:
+
+```js
+window.addEventListener("message", (event) => {
+  if (event.source !== window) return;   // do not copy this
+  ...
+});
+```
+
+Across Firefox's Xray boundary the sender is not reliably the same object as the
+content script's own `window`, so the comparison can be false for the
+extension's own messages. It fails **closed and silently**: the bridge is dead,
+everything else looks healthy, and the only symptom is that likes the DOM path
+cannot see never appear. The published guidance for page↔content messaging is
+written for the page's side of the boundary, not the extension's.
+
+What actually keeps the bridge honest is the origin check plus a strict shape
+check on the payload — an exact marker string, an action in a known set, and a
+video id that matches `^[A-Za-z0-9_-]{11}$`. A same-origin forger on
+music.youtube.com gains nothing it could not do by calling the like endpoint
+itself.
+
+

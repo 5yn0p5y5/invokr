@@ -362,12 +362,42 @@ def get_job(job_id: str, _: None = Depends(require_token)) -> dict:
     job = db.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="unknown job")
+
+    # Tells the caller whether a failure is still news. The watchdog in the
+    # extension polls a job for minutes, and by the time it settles the user may
+    # have fixed it the obvious way — by liking the song again — which queues a
+    # brand new job and leaves this one untouched.
+    job["outstanding"] = db.failure_outstanding(job)
     return job
+
+
+@app.get("/api/failures")
+def api_failures(limit: int = 10, _: None = Depends(require_token)) -> dict:
+    """
+    Failed downloads that still need attention.
+
+    Deliberately not "every job with status failed": a failure whose track has
+    since been archived — including by liking the song again — is history, not
+    something to put a Retry button in front of.
+    """
+    return {"failures": db.outstanding_failures(limit=limit)}
 
 
 @app.get("/api/tracks")
 def get_tracks(limit: int = 100, _: None = Depends(require_token)) -> dict:
     return {"tracks": db.all_tracks(limit=limit)}
+
+
+@app.get("/api/stats")
+def get_stats(_: None = Depends(require_token)) -> dict:
+    """
+    Whole-database totals for the extension's library counter.
+
+    Separate from ``/api/tracks`` on purpose: that endpoint is paginated, so a
+    client counting its rows would undercount as soon as the archive passed the
+    limit — exactly the "is everything still there" question this answers.
+    """
+    return db.track_stats()
 
 
 @app.get("/api/events")
@@ -728,6 +758,49 @@ def api_job_cancel(job_id: str, _: None = Depends(require_token)) -> dict:
         "job_cancelled", video_id=job["video_id"], detail={"job_id": job_id}
     )
     return {"cancelled": True, "jobId": job_id}
+
+
+@app.post("/api/jobs/{job_id}/retry")
+def api_job_retry(job_id: str, _: None = Depends(require_token)) -> dict:
+    """
+    Put a failed download back in the queue.
+
+    The worker already retries once on its own before giving up, so reaching
+    this endpoint means both of those failed. Only terminal states qualify:
+    re-queueing a job the worker is still running would download it twice.
+    """
+    job = db.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="unknown job")
+
+    # The track may have been archived since this job failed — most likely by
+    # liking the song again, which queues a new job and leaves this one alone.
+    # Re-queueing it here would download the same audio twice.
+    archived = _archived(db.track_state(job["spotify_id"]))
+    if archived:
+        return {
+            "retried": False,
+            "alreadyArchived": True,
+            "path": archived.get("path"),
+            "detail": "already archived — there is nothing to retry",
+        }
+
+    if job["status"] not in {"failed", "cancelled"}:
+        return {
+            "retried": False,
+            "status": job["status"],
+            "detail": "only failed or cancelled downloads can be retried",
+        }
+
+    db.update_job(job_id, "queued", error=None)
+    db.set_track_status(job["spotify_id"], "queued", error=None)
+    db.record_event(
+        "job_retried",
+        video_id=job["video_id"],
+        spotify_id=job["spotify_id"],
+        detail={"job_id": job_id, "previous": job["status"]},
+    )
+    return {"retried": True, "jobId": job_id, "status": "queued"}
 
 
 # ------------------------------------------------------------- settings ------

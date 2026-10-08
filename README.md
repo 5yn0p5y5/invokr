@@ -30,24 +30,26 @@ exact video you liked.
 ## How it works
 
 ```
-Firefox (music.youtube.com)                Local server (127.0.0.1:8765)
-┌──────────────────────────────┐           ┌────────────────────────────────┐
-│ background.js                │           │ POST /api/review               │
-│   • webRequest sees the      │           │   → search iTunes + Deezer     │
-│     /youtubei/v1/like POST   │  Bearer   │   → rank the candidates        │
-│     and reads target.videoId │  token    │   → auto-download, or ask      │
-│   • dedupes, posts, badges   │ ────────► │                                │
-│     the toolbar icon         │           │ GET  /api/reviews              │
-│                              │           │ GET  /api/review/{id}          │
-│ popup.js (toolbar panel)     │           │   → candidates as JSON         │
-│   • renders candidates,      │           │                                │
-│     manual metadata, art     │           │ worker: yt-dlp + mutagen       │
-│   • confirms / skips         │           │   → download the exact video   │
-│                              │           │   → write tags + cover art     │
-│ ytm-bridge.js (content)      │           │   → verify the file on disk    │
-│   • reads the player bar for │           │                                │
-│     title/artist/duration    │           │ SQLite: tracks, jobs, events   │
-└──────────────────────────────┘           └────────────────────────────────┘
+Firefox (music.youtube.com)                 Local server (127.0.0.1:8765)
+┌────────────────────────────────┐           ┌────────────────────────────────┐
+│ background.js                  │           │ POST /api/review               │
+│   • three signals, deduped     │           │   → search iTunes + Deezer     │
+│     on (action, videoId)       │ Bearer    │   → rank the candidates        │
+│   • posts, badges the icon     │ ────────► │   → auto-download, or ask      │
+│                                │ token     │                                │
+│ ytm-bridge.js (content)        │           │ GET  /api/reviews              │
+│   • like-status + clicks,      │           │ GET  /api/review/{id}          │
+│     read with the videoId      │           │   → candidates as JSON         │
+│                                │           │                                │
+│ ytm-net.js (page world)        │           │ worker: yt-dlp + mutagen       │
+│   • reads the like POST        │           │   → download the exact video   │
+│     as the page sends it       │           │   → write tags + cover art     │
+│                                │           │   → verify the file on disk    │
+│ popup.js (toolbar panel)       │           │                                │
+│   • renders candidates,        │           │ SQLite: tracks, jobs, events   │
+│     manual metadata, art       │           │                                │
+│   • confirms / skips           │           │                                │
+└────────────────────────────────┘           └────────────────────────────────┘
 ```
 
 The audio **always** comes from the video you liked. The catalogue is only used
@@ -55,11 +57,17 @@ for metadata — title, artist, album, year, track number, genre and cover art.
 
 Two design choices are worth knowing up front:
 
-- **Likes are detected from the network, not the DOM.** `webRequest` reads
-  `target.videoId` out of the `/youtubei/v1/like/*` POST that YouTube Music
-  sends. That works identically for the player bar, playlist rows and the "…"
-  menu, and it cannot fail silently. A DOM observer would only ever see the
-  currently playing track.
+- **Likes are detected three times over, and de-duplicated.** The player bar's
+  `like-status` attribute is the source of truth for like versus un-like; a
+  click on the control is captured before YouTube Music's own handler runs, so
+  the first like of a freshly started track is never mistaken for the baseline;
+  and [ytm-net.js](extension/ytm-net.js) reads the `/youtubei/v1/like/*` POST
+  inside the page, which is the only way to see a like of a track that is not
+  playing. `webRequest` is still registered as a fourth signal, but Firefox
+  does not reliably hand over request bodies, so nothing depends on it.
+  Which song a like belongs to comes from the page's own player rather than the
+  address bar, so it also works while browsing — where the URL has no `?v=` —
+  and with the player bar collapsed.
 - **Obvious matches download without asking.** The server scores every
   candidate and only opens the review panel when something is genuinely
   ambiguous. See [tuning auto-accept](#tuning-auto-accept).
@@ -72,7 +80,7 @@ Two design choices are worth knowing up front:
 |---|---|
 | **Python** | 3.10 or newer |
 | **ffmpeg** | must be on `PATH` — `winget install Gyan.FFmpeg` / `brew install ffmpeg` / `apt install ffmpeg` |
-| **Firefox** | 115 or newer. **149+** to have the review panel open automatically |
+| **Firefox** | 128 or newer — the page-world sniffer needs `world: "MAIN"`. **149+** to have the review panel open automatically |
 | **OS** | developed on Windows; the server is plain Python and should run anywhere |
 
 There is nothing else to sign up for.
@@ -166,6 +174,24 @@ The toolbar badge tells you the state:
 | ↓ (blue) | A download is running |
 | ✓ (green) | Saved, or already in your archive |
 | ! (red) | Token rejected, server unreachable, or the download failed |
+
+**A download that fails is retried once, a second later.** Most failures are
+transient — a YouTube bot check, a dropped connection — and the same job
+usually works on the second run. If both attempts fail, the extension says so
+and **opens the panel**, where the reason is shown with a **Retry** button. The
+failure is not lost if the panel cannot be opened (an older Firefox, or another
+panel already up): a notification is sent either way, and the failed job is
+still listed in the panel the next time you open it.
+
+**And it clears itself when you fix it the obvious way.** Liking the song again
+is the natural response to a failed download, and it works — but it does not
+retry the job, it runs the whole like path and queues a *new* one. The old job
+row stays `failed` for ever, which used to leave the panel insisting three
+downloads had failed when all three were sitting in the library. A failure is
+now only reported while the track it belongs to has no file, so re-liking clears
+it, and a `Retry` on something already archived is refused rather than
+downloaded twice.
+
 
 Three ways out of a review:
 
@@ -358,9 +384,12 @@ Everything under `/api/*` needs `Authorization: Bearer <token>`.
 | `DELETE` | `/api/review/{id}` | Discard without a decision |
 | `DELETE` | `/api/reviews` | Discard every pending review |
 | `POST` | `/api/library/import` | `{path?, dryRun?, recursive?}` — register existing files |
-| `GET` | `/api/jobs` · `/api/jobs/{id}` | Recent jobs / one job |
+| `GET` | `/api/jobs` · `/api/jobs/{id}` | Recent jobs / one job, with `outstanding` on a failure |
+| `GET` | `/api/failures` | Failed downloads whose track still has no file |
 | `POST` | `/api/jobs/{id}/cancel` | Cancel a download that has not started |
+| `POST` | `/api/jobs/{id}/retry` | Re-queue a failed or cancelled download |
 | `GET` | `/api/tracks` · `/api/events` · `/api/queue` | Archive index, event log, queue depth |
+| `GET` | `/api/stats` | Whole-database totals: `{tracks, playable, by_status}` |
 
 `POST /api/review` returns `{"skipped": true}` when the video is already
 archived, or `{"auto": true, "jobId": …}` when the match was confident enough to
@@ -376,22 +405,36 @@ so you can see exactly where something stopped.
 | Reading | Meaning |
 |---|---|
 | `FAILED to reach the content script` | The tab predates the extension. Reload the YouTube Music tab. |
-| `like requests seen` stays `0` | The `webRequest` hook is not firing |
-| `like requests seen` rises, `likes detected` does not | The request body shape changed |
+| `page script present` is `false` | The page-world sniffer did not load. Firefox 128+ and a reloaded tab are required. |
+| `clicks on like control` rises, `accepted by signal` does not | The click was seen but the state never changed — YouTube Music did not apply the rating. |
+| `accepted by signal` shows only `page-network` | The DOM path is not seeing the player bar; check `like renderer found` / `in-player-bar`. |
+| `dropped transitions` is non-empty | A track change raced a like-status rewrite; the event was discarded rather than charged to the wrong song. |
 | `likes detected` rises, no server calls | The server was never reached — check the token and URL |
 | A server call with a status | The failure is server-side; see `/api/events` |
 
 The diagnostics also keep two logs: **recent innertube POSTs** (what YouTube
-Music actually sent) and **recent dispatch decisions** (what the extension did
-with it). Between them, a missed like is no longer a mystery.
+Music actually sent, with the body kind and a raw preview for like requests)
+and **recent dispatch decisions** (what the extension did with it, and through
+which of the signals). Between them, a missed like is no longer a mystery.
 
 **The review panel does not open by itself.**
 `action.openPopup()` needs Firefox 149+; earlier builds refuse the call and it
 falls back to badging the icon. Diagnostics reports `popup API` accordingly.
 
 **Nothing downloads, the server log says the job failed.**
-`http://127.0.0.1:8765/api/events` shows recent errors. Common causes: YouTube
+Every download is attempted twice, a second apart, before it is reported — so a
+job in this state has already had its second chance. The panel shows the reason
+with a **Retry** button, which queues a fresh pair of attempts.
+`http://127.0.0.1:8765/api/events` shows the same thing as `download_failed` and
+`download_retry` events. Common causes: YouTube
 bot checks, a region-locked video, or a video that has been removed.
+
+**The panel still complains about a song you have since downloaded.**
+It should not — the failure is dropped as soon as the track has a file, so
+`GET /api/failures` is the authoritative list. If a failure lingers, its track
+row is still marked `failed` with no path: check
+`http://127.0.0.1:8765/api/tracks` for that song. Re-liking it queues a new job
+and clears the old complaint.
 
 **The archive looks empty after you moved it.**
 The index is still pointing at the old paths. Set the new master folder
@@ -441,6 +484,22 @@ local equivalent — `about:debugging` can never survive a restart.
    as downloads rather than add-on installs, so users open the downloaded file
    to install it.
 
+4. **Restart the server too.** The extension and the server are installed
+   separately, so it is easy to end up with a new extension talking to a server
+   process that is days old. Nothing breaks — the panel says the server is an
+   older build instead of failing — but any endpoint added in the release only
+   exists after the server is restarted, so likes appear to stop being accepted
+   while `/api/review` is in fact working fine.
+
+   To tell the two apart, ask the server for the route directly: a route that
+   does not exist answers `404`, while one that merely wants a token answers
+   `401`. `GET /` reports a version, but it is the source version and does not
+   change per build, so it cannot identify which process is running.
+
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8765/api/failures
+   ```
+
 ### AMO credentials
 
 Unlisted signing is self-distribution: AMO signs automatically, with no listing
@@ -477,12 +536,43 @@ installed build stays put until the user installs a newer release.
 
 ## Design notes
 
-**Why `webRequest` instead of a DOM observer?** The first version watched the
-`like-status` attribute from a `world: "MAIN"` content script. When `world:
-"MAIN"` is not honoured, that script runs isolated, `getVideoData()` returns
-nothing, `videoId` is null, and every event is dropped **silently** — which is
-exactly what happened. Reading the video id off the network request has no such
-failure mode and covers every like surface.
+**Why three signals instead of one?** Every single-signal version of this has
+failed in production, each for a different reason. The original watched
+`like-status` from a `world: "MAIN"` content script; when `world: "MAIN"` was
+not honoured the script ran isolated, the player API was invisible, `videoId`
+was `null`, and every event was dropped **silently**. It was replaced by a
+`webRequest` body read — which turned out to be worse: Firefox only fills in
+`details.requestBody` when it can reach the upload stream, and
+`WebRequestUpload.createRequestBody` returns form data with no raw bytes
+whenever the body parses as form encoded. Diagnostics showed
+`/youtubei/v1/like/like` arriving with `no videoId in body` for **every** like,
+so detection had quietly fallen back to the DOM observer alone.
+
+That observer then dropped roughly one like in five, for a subtler reason. It
+took the first `like-status` value it ever saw for a video id as a "baseline"
+and returned early, on the theory that the first value is whatever YouTube
+Music rendered. But YouTube Music does not rewrite the attribute when the value
+has not changed, so a track that started out `INDIFFERENT` — the common case —
+never got a baseline at all, and the user's own like arrived as a first
+observation. It was discarded as if it were pre-existing state.
+
+The current design removes the guesswork instead of adding more of it: a poll
+records a baseline for whatever is playing within a second, a capture-phase
+click listener records the pre-click state before YouTube Music can change it,
+and a flip is only reported once it has survived a short delay with the same
+track still playing.
+
+**Why keep `webRequest` at all?** It is registered, costs one listener, and is
+a fourth independent signal on the rare occasion Firefox does hand over the
+body. Nothing depends on it.
+
+**The fiddly parts have regression tests.** `node tools/test-like-detection.js`
+loads the content script against a fake DOM and drives it through the scenarios
+that have actually broken in the field — a track whose `like-status` is never
+rewritten, a click on a track with no baseline yet, and a track change that
+races an attribute rewrite. `python tools/test-download-retry.py` does the same
+for the download retry, against a temporary database with a scripted download.
+Neither needs a browser, a network, or a real archive.
 
 **Why not spotDL?** spotDL's `YouTubeURL|SpotifyURL` syntax is elegant, and this
 project started there. But `reinit_song()` calls `Song.from_url()` for every

@@ -1,15 +1,20 @@
 /**
  * invokr — background event page.
  *
- * Detection happens here, not in the page. `webRequest.onBeforeRequest` can
- * read the body of the `/youtubei/v1/like/*` POST that YouTube Music sends when
- * you like something, which gives us the video id directly from the network
- * layer. That works for the player bar, playlist rows and the "…" menu, needs
- * no page-world injection, and cannot fail silently the way a DOM observer can.
+ * Detection is redundant on purpose. Three signals converge here and are
+ * de-duplicated on (action, videoId) so one like never posts twice:
  *
- * The content script's `like-status` observer is kept as a second signal. Both
- * paths funnel through `dispatchLike`, which de-duplicates on
- * (action, videoId) so one like never posts twice.
+ *   1. `webRequest.onBeforeRequest` on the `/youtubei/v1/like/*` POST, which
+ *      carries the video id in the request body. Kept because it costs nothing
+ *      and works whenever Firefox hands the upload stream over, but it is no
+ *      longer the primary source: `WebRequestUpload.createRequestBody` returns
+ *      form data with no raw bytes whenever the body parses as form encoded,
+ *      and in practice this path reported "no videoId in body" for every like.
+ *   2. The `like-status` observer in the content script, which is the source of
+ *      truth for LIKE vs UNLIKE on the playing track.
+ *   3. `ytm-net.js` in the page world, which reads the like POST as the page
+ *      sends it. This is the only signal that sees a like of a track that is
+ *      not the one playing.
  */
 
 const DEFAULTS = {
@@ -23,8 +28,8 @@ const DEFAULTS = {
   autoOpenPopup: true,
 };
 
-// Only needs to cover the gap between the two observers of a single click:
-// webRequest fires as the POST goes out, the like-status attribute flips a few
+// Only needs to cover the gap between the signals for a single click: the page
+// world sees the POST as it goes out, the like-status attribute flips a few
 // hundred milliseconds later once the server responds. It must stay short, or
 // a genuine second like gets swallowed.
 const DEDUPE_WINDOW_MS = 4000;
@@ -36,9 +41,13 @@ const stats = {
   popupApi: null,
   requestsSeen: 0,
   requestsUnparsed: 0,
+  // Counted in `dispatchLike`, so they mean "an event was accepted from any
+  // signal". They used to be incremented only in the webRequest branch, which
+  // made them read 0 while likes were being detected and processed.
   likesDetected: 0,
   unlikesDetected: 0,
   duplicatesSuppressed: 0,
+  bySource: {},
   serverCalls: [],
   recentRequests: [],
   recentDispatches: [],
@@ -120,22 +129,67 @@ function api(path, body, { serverUrl, token }) {
 
 // -------------------------------------------------------------- detection
 
-function videoIdFromRequestBody(requestBody) {
-  try {
-    const raw = requestBody && requestBody.raw;
-    if (!raw || !raw.length || !raw[0] || !raw[0].bytes) return null;
-    const text = new TextDecoder("utf-8").decode(new Uint8Array(raw[0].bytes));
-    return findVideoId(JSON.parse(text));
-  } catch (_) {
-    return null;
+/**
+ * Turn `details.requestBody` into text.
+ *
+ * Firefox does not hand back one uniform shape. Per
+ * `WebRequestUpload.createRequestBody`, a body that parses as form data comes
+ * back as `{formData}` with **no** `raw` bytes, while anything else — including
+ * the JSON that YouTube Music sends — comes back as `{raw}` plus a leniently
+ * parsed `lenientFormData`. The old code read `raw` only, so every like request
+ * was reported as "no videoId in body" even though the body was right there.
+ *
+ * `kind` is carried into the diagnostics so a future body-shape change is
+ * visible instead of guessable.
+ */
+function decodeRequestBody(requestBody) {
+  if (!requestBody) return { kind: "absent", text: "" };
+  if (requestBody.error) return { kind: "error", text: "" };
+
+  const chunks = requestBody.raw;
+  if (chunks && chunks.length) {
+    let text = "";
+    for (const chunk of chunks) {
+      if (!chunk) continue;
+      if (chunk.file) return { kind: "file", text: "" };
+      if (chunk.bytes) {
+        text += new TextDecoder("utf-8").decode(new Uint8Array(chunk.bytes));
+      }
+    }
+    if (text) return { kind: "raw", text };
   }
+
+  const form = requestBody.formData || requestBody.lenientFormData;
+  if (form) {
+    const pairs = [];
+    for (const [key, value] of Object.entries(form)) {
+      for (const item of [].concat(value)) {
+        pairs.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(item))}`);
+      }
+    }
+    if (pairs.length) return { kind: "formData", text: pairs.join("&") };
+  }
+
+  return { kind: "empty", text: "" };
+}
+
+function videoIdFromBodyText(text) {
+  if (!text) return null;
+  try {
+    const found = findVideoId(JSON.parse(text));
+    if (found) return found;
+  } catch (_) {
+    /* not JSON — the textual scan below still applies */
+  }
+  const match = /"video[_-]?id"\s*:\s*"([A-Za-z0-9_-]{11})"/i.exec(text);
+  return match ? match[1] : null;
 }
 
 /**
  * Pull a video id out of an innertube request body.
  *
  * The shape we expect is `{target: {videoId}}`, but that is reverse-engineered
- * rather than documented, so fall back to scanning for any `*videoId` key. A
+ * rather than documented, so fall back to scanning for any `*video_id` key. A
  * body-shape change then degrades to "still works" rather than "silently stops
  * detecting likes".
  */
@@ -144,7 +198,7 @@ function findVideoId(value, depth = 0) {
   for (const [key, item] of Object.entries(value)) {
     if (
       typeof item === "string" &&
-      /videoId$/i.test(key) &&
+      /video_?id$/i.test(key) &&
       /^[A-Za-z0-9_-]{11}$/.test(item)
     ) {
       return item;
@@ -199,20 +253,32 @@ function installWebRequestHook() {
           if (details.method !== "POST") return;
           stats.requestsSeen += 1;
 
-          const videoId = videoIdFromRequestBody(details.requestBody);
+          const isLike = details.url.includes("/like/");
 
-          // Record every innertube POST, not just the ones we act on. If a like
-          // is ever missed, the request log shows whether it was sent at all
-          // and under which path, instead of leaving us to guess.
-          stats.recentRequests.push({
+          // Record every innertube POST, but only decode the body of a like
+          // request. If a like is ever missed, the log shows whether the
+          // request was sent at all, what the body looked like, and what we
+          // managed to read out of it.
+          const entry = {
             at: Date.now(),
             path: details.url.replace(/^https?:\/\/[^/]+/, "").split("?")[0],
-            like: details.url.includes("/like/"),
-            videoId: videoId || null,
-          });
-          if (stats.recentRequests.length > 25) stats.recentRequests.shift();
+            like: isLike,
+            videoId: null,
+          };
 
-          if (!details.url.includes("/like/")) return;
+          if (!isLike) {
+            stats.recentRequests.push(entry);
+            if (stats.recentRequests.length > 25) stats.recentRequests.shift();
+            return;
+          }
+
+          const body = decodeRequestBody(details.requestBody);
+          const videoId = videoIdFromBodyText(body.text);
+          entry.videoId = videoId || null;
+          entry.body = body.kind;
+          entry.preview = body.text.slice(0, 160);
+          stats.recentRequests.push(entry);
+          if (stats.recentRequests.length > 25) stats.recentRequests.shift();
 
           // /like/dislike is a thumbs-down: not our business.
           if (details.url.includes("/like/dislike")) return;
@@ -223,15 +289,12 @@ function installWebRequestHook() {
               action: "?",
               videoId: null,
               source: "webRequest",
-              outcome: "no videoId in body",
+              outcome: `no videoId in body (${body.kind})`,
             });
             return;
           }
 
           const action = details.url.includes("/like/remove") ? "unlike" : "like";
-          if (action === "unlike") stats.unlikesDetected += 1;
-          else stats.likesDetected += 1;
-
           dispatchLike({ action, videoId, tabId: details.tabId, source: "webRequest" });
         } catch (error) {
           note("webRequest", error);
@@ -263,6 +326,10 @@ function dispatchLike({ action, videoId, tabId, source, title, artists, album, d
   // An un-like resets the state, so re-liking straight afterwards must not be
   // swallowed by the dedupe window of the original like.
   if (action === "unlike") recent.delete(`like:${videoId}`);
+
+  if (action === "unlike") stats.unlikesDetected += 1;
+  else stats.likesDetected += 1;
+  stats.bySource[source] = (stats.bySource[source] || 0) + 1;
 
   recordDispatch({ action, videoId, source, outcome: "dispatched" });
 
@@ -461,12 +528,37 @@ function watchJob(jobId, label) {
         setTimeout(() => badge("", ""), 10000);
         return;
       }
+      // A failure the user has already fixed is not news. Liking the song again
+      // runs the whole like path and creates a new job, which leaves this one
+      // sitting at "failed" — so ask the server whether it still matters
+      // instead of trusting the status alone.
+      if (job.status === "failed" && job.outstanding === false) {
+        await badge("✓", "#2f6b3a");
+        setTimeout(() => badge("", ""), 10000);
+        return;
+      }
+
       if (job.status === "failed" || job.status === "cancelled") {
+        const cancelled = job.status === "cancelled";
         await badge("!", "#b3261e");
         await notify(
-          job.status === "cancelled" ? "Download cancelled" : "Download failed",
-          `${label}${job.error ? ` — ${job.error}` : ""}`
+          cancelled ? "Download cancelled" : "Download failed — retry?",
+          cancelled
+            ? label
+            : `${label}${job.error ? ` — ${job.error}` : ""} — open the extension to retry.`
         );
+
+        // The worker retries once by itself, so a job that reports "failed"
+        // has already had a second chance. Put it in front of the user, where
+        // the popup shows the reason and a Retry button.
+        //
+        // Deliberately not gated on `autoOpenPopup`: that setting is about
+        // interrupting for a *review*, and this is a failure the user asked to
+        // be told about. If the panel cannot be opened (an older Firefox, or
+        // another panel already up) the notification above is the durable
+        // signal, and the failure is still there on the next click.
+        if (!cancelled) await tryOpenPopup();
+
         setTimeout(() => badge("", ""), 10000);
         return;
       }

@@ -231,6 +231,20 @@ async function runDiagnostics() {
     out.push(line("unlikes detected", stats.unlikesDetected));
     out.push(line("duplicates suppressed", stats.duplicatesSuppressed));
 
+    const bySource = stats.bySource || {};
+    const sources = Object.keys(bySource);
+    if (sources.length) {
+      out.push(
+        line(
+          "accepted by signal",
+          sources
+            .sort((a, b) => bySource[b] - bySource[a])
+            .map((name) => `${name}=${bySource[name]}`)
+            .join("  ")
+        )
+      );
+    }
+
     out.push("");
     out.push("  recent server calls:");
     if (!stats.serverCalls.length) {
@@ -272,8 +286,10 @@ async function runDiagnostics() {
     for (const item of requests) {
       out.push(
         `    ${new Date(item.at).toLocaleTimeString()}  ${item.path}` +
-          `${item.like ? "  [like]" : ""}  videoId=${item.videoId || "-"}`
+          `${item.like ? "  [like]" : ""}  videoId=${item.videoId || "-"}` +
+          `${item.body ? `  body=${item.body}` : ""}`
       );
+      if (item.like && item.preview) out.push(`      raw: ${item.preview}`);
     }
   }
 
@@ -301,13 +317,34 @@ async function runDiagnostics() {
     if (diag.likeRenderer) {
       out.push(
         `      tag=${diag.likeRenderer.tag} id=${diag.likeRenderer.id} ` +
-          `like-status=${diag.likeRenderer.likeStatus} connected=${diag.likeRenderer.connected}`
+          `like-status=${diag.likeRenderer.likeStatus} connected=${diag.likeRenderer.connected} ` +
+          `in-player-bar=${diag.likeRenderer.inPlayerBar}`
       );
     }
     out.push(`    player bar found       ${diag.playerBarFound}`);
+    out.push(`    page script present    ${diag.snifferPresent}`);
+    out.push(`    player says playing    ${JSON.stringify(diag.playerTrack)}`);
+    out.push(`    state reads            ${diag.syncs} (syncs)`);
     out.push(`    like-status changes    ${diag.likeStatusChanges}`);
+    out.push(`    clicks on like control ${diag.clicks}`);
+    out.push(`    toast confirmations    ${diag.toastSignals}`);
+    out.push(`    network signals        ${diag.networkSignals}`);
+    out.push(`      ...no id in body     ${diag.networkUnreadable}`);
+    out.push(`    tracks tracked         ${diag.trackedVideos}`);
+    out.push(`    tracks reported        ${diag.reportedVideos}`);
+    out.push(`    last read              ${JSON.stringify(diag.lastSync)}`);
     out.push(`    current track          ${JSON.stringify(diag.currentTrack)}`);
     out.push(`    media session          ${JSON.stringify(diag.mediaSession)}`);
+
+    if (diag.discardedTransitions && diag.discardedTransitions.length) {
+      out.push("    dropped transitions (track moved while confirming):");
+      for (const item of diag.discardedTransitions) {
+        out.push(
+          `      ${new Date(item.at).toLocaleTimeString()}  ${item.videoId} -> ${item.status} ` +
+            `but now playing ${item.nowPlaying} (${item.reason})`
+        );
+      }
+    }
 
     out.push("    recent toasts:");
     if (!diag.recentToasts.length) {
@@ -325,9 +362,13 @@ async function runDiagnostics() {
 
   out.push("");
   out.push(
-    "Reading it: if 'like requests seen' stays 0 when you like a song, the webRequest " +
-      "hook is not firing. If it rises but 'likes detected' does not, the request body " +
-      "shape has changed. If 'recent server calls' stays empty, the server was never called."
+    "Reading it: 'accepted by signal' is what actually got through, and by which " +
+      "of like-status (player bar, click, poll, toast), page-network or webRequest. " +
+      "If a like reports nothing at all, check 'clicks on like control' — a click " +
+      "that was seen but produced no report means the state never changed, and " +
+      "nothing was liked. If 'page script present' is false, the page-world " +
+      "sniffer did not load (Firefox 128+ and a reload of the tab are required). " +
+      "If 'recent server calls' stays empty, the server was never called."
   );
 
   renderDiag(out.join("\n"));

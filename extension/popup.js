@@ -6,6 +6,10 @@
  * the newest one. Sessions live on the server with a TTL, so closing the popup
  * by accident loses nothing — reopen it and the review is still there.
  *
+ * It also asks for whole-database totals (`GET /api/stats`) and shows them as a
+ * badge in the header, so the size of the archive is visible without paging
+ * through `/api/tracks`.
+ *
  * Every action is one-shot: buttons disable themselves on click, and a
  * completed action replaces the panel with a result state that has no repeat
  * button for the same session.
@@ -65,6 +69,43 @@
 
   function setSub(text) {
     $("sub").textContent = text || "";
+  }
+
+  // ------------------------------------------------------- library counter
+
+  /** 1204 → "1,204" so a five-figure archive stays readable at a glance. */
+  function fmtCount(value) {
+    return Number(value || 0).toLocaleString("en-US");
+  }
+
+  /**
+   * Show how many songs the database knows about.
+   *
+   * Deliberately never throws and is never awaited: it is a read-only badge, so
+   * a slow or dead server must not replace the panel's own error or hold up the
+   * review that is actually waiting. It renders in every state — idle, review,
+   * even unconfigured — because comparing the total against the master folder is
+   * exactly what you want to do when something looks wrong.
+   *
+   * Server contract: GET /api/stats → {tracks, playable, by_status}.
+   */
+  async function loadStats() {
+    const badge = $("libCount");
+    if (!badge || !config.token) return;
+
+    try {
+      const stats = await api("/api/stats");
+      badge.classList.remove("err");
+      badge.textContent = fmtCount(stats.tracks);
+      badge.title = [
+        `${fmtCount(stats.tracks)} songs known to the database`,
+        `${fmtCount(stats.playable)} archived`,
+      ].join("\n");
+    } catch (_) {
+      badge.classList.add("err");
+      badge.textContent = "—";
+      badge.title = "library count unavailable — server not reachable";
+    }
   }
 
   // ------------------------------------------------------------- dom helpers
@@ -133,6 +174,115 @@
     }
   }
 
+  // ------------------------------------------------------- failed downloads
+
+  let failedJobs = [];
+
+  // Set when the server answers 404 for /api/failures, which means it is an
+  // older build rather than broken. The extension and the server are installed
+  // separately, so that is a normal state, not an error worth hiding the panel
+  // behind.
+  let failuresUnsupported = false;
+
+  function isMissingRoute(error) {
+    return /\bHTTP (404|405|501)\b/.test(String((error && error.message) || ""));
+  }
+
+  /**
+   * The complaint.
+   *
+   * A download that failed twice is the only thing in this panel that wants a
+   * decision rather than a glance, so it is rendered as an error note with the
+   * reason and a Retry button. It is shown in whichever view the panel happens
+   * to open in, because the background page opened it *because* of this.
+   *
+   * The worker already retried once before the job reached this state; a
+   * manual retry is a fresh pair of attempts.
+   */
+  function failureNote() {
+    if (!failedJobs.length) return null;
+
+    const note = el("div", { class: "note err" });
+    note.appendChild(
+      el("div", {
+        text:
+          failedJobs.length === 1
+            ? "Download failed. Retrying usually works."
+            : `${failedJobs.length} downloads failed. Retrying usually works.`,
+      })
+    );
+
+    for (const job of failedJobs.slice(0, 2)) {
+      const title = job.title || job.video_id || job.job_id;
+      note.appendChild(el("div", { class: "sub", text: title }));
+      if (job.error) {
+        note.appendChild(el("div", { class: "sub", text: String(job.error).slice(0, 200) }));
+      }
+
+      // No button against an older server: /api/jobs/{id}/retry arrived in the
+      // same build as /api/failures, so it would answer 404 as well.
+      if (failuresUnsupported) continue;
+
+      note.appendChild(
+        el("div", { class: "row" }, [
+          actionButton("Retry", "primary", async () => {
+            const result = await api(`/api/jobs/${job.job_id}/retry`, { method: "POST" });
+            if (result.alreadyArchived) {
+              throw new Error("already in your archive — nothing to retry");
+            }
+            if (!result.retried) throw new Error(result.detail || "could not retry");
+            watchJob(result.jobId, title);
+            await init();
+          }),
+        ])
+      );
+    }
+
+    if (failedJobs.length > 2) {
+      note.appendChild(el("div", { class: "sub", text: `…and ${failedJobs.length - 2} more.` }));
+    }
+
+    if (failuresUnsupported) {
+      note.appendChild(
+        el("div", {
+          class: "sub",
+          text:
+            "This server is an older build with no /api/failures, so a failure " +
+            "stays listed even after the song has been downloaded. Restart the " +
+            "server to pick up the new endpoints.",
+        })
+      );
+    }
+    return note;
+  }
+
+  async function refreshFailedJobs() {
+    try {
+      // /api/failures, not /api/jobs: a job that failed but whose track has
+      // since been archived is not something to put a Retry button in front of.
+      const data = await api("/api/failures?limit=12");
+      failedJobs = data.failures || [];
+      failuresUnsupported = false;
+      return failedJobs;
+    } catch (error) {
+      failuresUnsupported = isMissingRoute(error);
+    }
+
+    // Older server. Fall back to the raw job list, which cannot tell whether
+    // the track was archived since — `failureNote` says as much rather than
+    // leaving the impression that these are all still broken.
+    failedJobs = [];
+    if (failuresUnsupported) {
+      try {
+        const jobs = await api("/api/jobs?limit=12");
+        failedJobs = (jobs.jobs || []).filter((job) => job.status === "failed");
+      } catch (_) {
+        /* the panel reports an unreachable server on its own */
+      }
+    }
+    return failedJobs;
+  }
+
   // ------------------------------------------------------------- result view
 
   function renderDone(text, remaining) {
@@ -167,20 +317,37 @@
     setSub("nothing waiting");
     pendingCount = 0;
 
-    const blocks = [
-      el("div", {
-        class: "sub",
-        text: "No review is pending. Like a song on YouTube Music and it appears here.",
-      }),
-    ];
+    const blocks = [];
 
     try {
       const [queue, jobs] = await Promise.all([
         api("/api/queue"),
-        api("/api/jobs?limit=8"),
+        api("/api/jobs?limit=12"),
       ]);
 
+      // Deliberately outside the Promise.all above. /api/failures does not
+      // exist on a server built before it, and one missing optional endpoint
+      // must not replace the whole panel with "Server: HTTP 404". This call
+      // never throws.
+      await refreshFailedJobs();
+
+      // The failure is the reason the panel was most likely opened, so it goes
+      // above the "nothing waiting" line rather than below it.
+      const note = failureNote();
+      if (note) blocks.push(note);
+
+      blocks.push(
+        el("div", {
+          class: "sub",
+          text: "No review is pending. Like a song on YouTube Music and it appears here.",
+        })
+      );
+
+      // `failed` is left out of the raw depth on purpose: it counts every job
+      // that ever failed, including ones whose song has since been downloaded.
+      // The note above is the live figure.
       const depth = Object.entries(queue.depth || {})
+        .filter(([status]) => status !== "failed")
         .map(([status, count]) => `${status}: ${count}`)
         .join("  ·  ");
       blocks.push(el("div", { class: "sub", text: `Queue — ${depth || "empty"}` }));
@@ -404,7 +571,12 @@
   function renderReview(session) {
     setSub(pendingCount > 1 ? `${pendingCount} pending` : "1 pending");
 
+    // A failed download is why this panel may have opened by itself, so it is
+    // reported here too rather than only in the idle view.
+    const failure = failureNote();
+
     const blocks = [
+      ...(failure ? [failure] : []),
       el("div", { class: "src" }, [
         el("img", { src: `https://i.ytimg.com/vi/${session.videoId}/mqdefault.jpg`, alt: "" }),
         el("div", { class: "body" }, [
@@ -521,6 +693,10 @@
       return;
     }
 
+    // Kick the counter off in parallel — it renders on its own and is not part
+    // of the panel's success or failure.
+    loadStats();
+
     $("content").textContent = "";
     $("content").appendChild(el("div", { class: "spin", text: "Loading…" }));
 
@@ -531,6 +707,9 @@
         await renderIdle();
         return;
       }
+      // Populate the failure note before the review view renders; renderIdle
+      // does it for itself from the jobs it already fetches.
+      await refreshFailedJobs();
       renderReview(await api(`/api/review/${data.reviews[0].reviewId}`));
     } catch (error) {
       await clearBadge();

@@ -454,6 +454,34 @@ def all_tracks(limit: int = 200) -> list[dict]:
     return _rows(rows)
 
 
+def track_stats() -> dict[str, Any]:
+    """
+    How many songs the database knows about, by status.
+
+    ``all_tracks`` is capped by its ``limit``, so it cannot answer "how many are
+    there" once the archive outgrows the cap. This counts in SQLite instead, and
+    recomputes ``playable`` from the grouped rows rather than a second query so
+    the two can never disagree.
+    """
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT status, COUNT(*) AS n
+            FROM tracks
+            GROUP BY status
+            -- archived first, so the popup can show the useful number first
+            ORDER BY CASE WHEN status = 'done' THEN 0 ELSE 1 END, status
+            """
+        ).fetchall()
+
+    by_status = {row["status"]: row["n"] for row in rows}
+    return {
+        "tracks": sum(by_status.values()),
+        "playable": by_status.get("done", 0),
+        "by_status": by_status,
+    }
+
+
 # ----------------------------------------------------------------------- jobs
 
 
@@ -497,6 +525,55 @@ def get_job(job_id: str) -> dict | None:
     with connect() as conn:
         row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
     return _row(row) if row else None
+
+
+def track_state(spotify_id: str) -> dict | None:
+    """The tracks row for `spotify_id`, with any stored path resolved."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM tracks WHERE spotify_id = ?", (spotify_id,)
+        ).fetchone()
+    return _row(row) if row else None
+
+
+def failure_outstanding(job: dict, track: dict | None = None) -> bool:
+    """
+    Is this failed job still worth reporting?
+
+    A job row is a historical fact — that download did fail — but it stops
+    mattering the moment the track has been archived, and that happens by a
+    route that leaves the job row alone. Liking the song again does not retry
+    the job; it runs the whole like path again and creates a *new* job. So the
+    old failure would be reported for ever, complete with a Retry button that
+    re-downloads a song already sitting in the library.
+
+    A retry that is already in flight counts as handled for the same reason.
+    """
+    if job.get("status") != "failed":
+        return False
+
+    if track is None:
+        track = track_state(job.get("spotify_id") or "")
+
+    # No track row at all proves nothing was archived.
+    if track is None:
+        return True
+
+    # 'done' without a path is not a file anyone can play, so it does not count.
+    if track.get("status") == "done" and track.get("path"):
+        return False
+
+    return track.get("status") not in {"queued", "downloading"}
+
+
+def outstanding_failures(limit: int = 20) -> list[dict]:
+    """Failed jobs that still need attention, newest first."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE status = 'failed' ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [job for job in _rows(rows) if failure_outstanding(job)]
 
 
 def recent_jobs(limit: int = 20) -> list[dict]:
