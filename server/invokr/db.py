@@ -576,6 +576,42 @@ def outstanding_failures(limit: int = 20) -> list[dict]:
     return [job for job in _rows(rows) if failure_outstanding(job)]
 
 
+def clear_failed_jobs() -> dict[str, int]:
+    """
+    Forget failed downloads: delete their job rows, and the failed track rows
+    they leave behind.
+
+    A track row is only removed when it is still 'failed' after the jobs are
+    gone. Liking the song again queues a new job for the same track, and that
+    row is the current state, not a leftover to clean up. Done tracks are never
+    touched — the audio on disk is the archive, and this only forgets attempts
+    that never produced a file.
+    """
+    with connect() as conn:
+        spotify_ids = [
+            row["spotify_id"]
+            for row in conn.execute(
+                "SELECT DISTINCT spotify_id FROM jobs WHERE status = 'failed'"
+            ).fetchall()
+        ]
+        removed_jobs = conn.execute(
+            "DELETE FROM jobs WHERE status = 'failed'"
+        ).rowcount
+        removed_tracks = 0
+        for spotify_id in spotify_ids:
+            removed_tracks += conn.execute(
+                """
+                DELETE FROM tracks
+                 WHERE spotify_id = ? AND status = 'failed'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM jobs WHERE spotify_id = ?
+                   )
+                """,
+                (spotify_id, spotify_id),
+            ).rowcount
+    return {"jobs": removed_jobs, "tracks": removed_tracks}
+
+
 def recent_jobs(limit: int = 20) -> list[dict]:
     with connect() as conn:
         rows = conn.execute(

@@ -95,11 +95,11 @@ function response(status, body) {
   };
 }
 
-global.fetch = async (url) => {
+global.fetch = async (url, options = {}) => {
   const route = String(url).replace(/^https?:\/\/[^/]+/, "").split("?")[0];
   const handler = server[route];
   if (!handler) return response(404, { detail: "Not Found" });
-  return handler();
+  return handler({ method: options.method || "GET" });
 };
 
 global.browser = {
@@ -131,10 +131,14 @@ function walk(node, out = []) {
 }
 
 /** Buttons, not the word — "Retrying usually works" contains "Retry" too. */
-function retryButtons() {
+function buttons(label) {
   return walk(nodes.content).filter(
-    (node) => node.tagName === "BUTTON" && node.textContent.trim() === "Retry"
+    (node) => node.tagName === "BUTTON" && node.textContent.trim() === label
   );
+}
+
+function retryButtons() {
+  return buttons("Retry");
 }
 
 const FAILED_JOB = {
@@ -198,7 +202,27 @@ async function loadPopup() {
   check("nothing outstanding: no complaint", !/Download failed/.test(text));
   check("nothing outstanding: no Retry button", retryButtons().length === 0, `${retryButtons().length} button(s)`);
 
-  // 4. A server on another machine whose host was never granted. That is a
+  // 4. Clearing failures deletes them on the server and re-renders without the
+  //    complaint.
+  newServer({ withFailuresEndpoint: true });
+  let clearedFailures = false;
+  server["/api/failures"] = ({ method } = {}) => {
+    if (method === "DELETE") {
+      clearedFailures = true;
+      return response(200, { cleared: 1, tracksRemoved: 1 });
+    }
+    return response(200, { failures: clearedFailures ? [] : [FAILED_JOB] });
+  };
+  text = await loadPopup();
+  const clearButtons = buttons("Clear failed");
+  check("current server: a Clear failed button is offered", clearButtons.length === 1, `${clearButtons.length} button(s)`);
+  await clearButtons[0].handlers.click[0]();
+  await sleep(60);
+  text = nodes.content.textContent;
+  check("clear failed: DELETE reaches the server", clearedFailures);
+  check("clear failed: the complaint is gone", !/Download failed/.test(text));
+
+  // 5. A server on another machine whose host was never granted. That is a
   //    permission problem, not a dead server, and the panel says which.
   stored = { serverUrl: "http://192.168.1.50:8765", token: "test-token" };
   permissionGranted = false;

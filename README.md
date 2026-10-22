@@ -399,6 +399,7 @@ Everything under `/api/*` needs `Authorization: Bearer <token>`.
 | `POST` | `/api/library/import` | `{path?, dryRun?, recursive?}` — register existing files |
 | `GET` | `/api/jobs` · `/api/jobs/{id}` | Recent jobs / one job, with `outstanding` on a failure |
 | `GET` | `/api/failures` | Failed downloads whose track still has no file |
+| `DELETE` | `/api/failures` | Forget failed downloads: delete their jobs and unused failed track rows |
 | `POST` | `/api/jobs/{id}/cancel` | Cancel a download that has not started |
 | `POST` | `/api/jobs/{id}/retry` | Re-queue a failed or cancelled download |
 | `GET` | `/api/tracks` · `/api/events` · `/api/queue` | Archive index, event log, queue depth |

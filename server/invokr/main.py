@@ -383,6 +383,22 @@ def api_failures(limit: int = 10, _: None = Depends(require_token)) -> dict:
     return {"failures": db.outstanding_failures(limit=limit)}
 
 
+@app.delete("/api/failures")
+def api_clear_failures(_: None = Depends(require_token)) -> dict:
+    """
+    Forget failed downloads.
+
+    This is the escape hatch for a job that cannot be made to work: it deletes
+    the job rows behind the Retry list, plus the failed track row when nothing
+    newer is using it. Audio is never deleted, and the event log keeps the
+    history of what happened.
+    """
+    removed = db.clear_failed_jobs()
+    if removed["jobs"] or removed["tracks"]:
+        db.record_event("failures_cleared", detail=removed)
+    return {"cleared": removed["jobs"], "tracksRemoved": removed["tracks"]}
+
+
 @app.get("/api/tracks")
 def get_tracks(limit: int = 100, _: None = Depends(require_token)) -> dict:
     return {"tracks": db.all_tracks(limit=limit)}

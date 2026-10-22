@@ -251,6 +251,20 @@
       note.appendChild(el("div", { class: "sub", text: `…and ${failedJobs.length - 2} more.` }));
     }
 
+    // Same build as /api/failures: an older server has no DELETE to call.
+    if (!failuresUnsupported) {
+      note.appendChild(
+        el("div", { class: "row" }, [
+          actionButton("Clear failed", "", async () => {
+            // Forgets the failed jobs and their failed track rows on the
+            // server. Nothing in the library is touched.
+            await api("/api/failures", { method: "DELETE" });
+            await init();
+          }),
+        ])
+      );
+    }
+
     if (failuresUnsupported) {
       note.appendChild(
         el("div", {
