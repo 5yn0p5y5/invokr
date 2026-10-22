@@ -84,6 +84,8 @@ global.document = {
 // ----------------------------------------------------------------- fake server
 
 let server;
+let stored = { token: "test-token" };
+let permissionGranted = true;
 function response(status, body) {
   return {
     ok: status >= 200 && status < 300,
@@ -101,10 +103,16 @@ global.fetch = async (url) => {
 };
 
 global.browser = {
-  storage: { local: { get: async () => ({ token: "test-token" }) } },
+  storage: { local: { get: async () => ({ ...stored }) } },
   action: { setBadgeText: async () => {} },
   runtime: { sendMessage: async () => {}, openOptionsPage: () => {} },
   tabs: { create: () => {} },
+  // The popup only ever asks whether the origin is granted; it cannot prompt.
+  permissions: {
+    contains: async () => permissionGranted,
+    request: async () => permissionGranted,
+    getAll: async () => ({ origins: [] }),
+  },
 };
 
 // ---------------------------------------------------------------------- cases
@@ -149,8 +157,12 @@ function newServer({ withFailuresEndpoint }) {
 }
 
 async function loadPopup() {
-  const source = fs.readFileSync(path.join(__dirname, "..", "extension", "popup.js"), "utf8");
-  eval(source); // eslint-disable-line no-eval
+  const read = (name) =>
+    fs.readFileSync(path.join(__dirname, "..", "extension", name), "utf8");
+  // server-access.js declares InvokrAccess at the top level of a classic script,
+  // so evaluate it in the same scope and publish it where popup.js will look.
+  eval(`${read("server-access.js")}\nglobalThis.InvokrAccess = InvokrAccess;`);
+  eval(read("popup.js")); // eslint-disable-line no-eval
   await sleep(60); // init() is fired at the end of the file, not awaited
   return nodes.content.textContent;
 }
@@ -185,6 +197,15 @@ async function loadPopup() {
 
   check("nothing outstanding: no complaint", !/Download failed/.test(text));
   check("nothing outstanding: no Retry button", retryButtons().length === 0, `${retryButtons().length} button(s)`);
+
+  // 4. A server on another machine whose host was never granted. That is a
+  //    permission problem, not a dead server, and the panel says which.
+  stored = { serverUrl: "http://192.168.1.50:8765", token: "test-token" };
+  permissionGranted = false;
+  text = await loadPopup();
+
+  check("denied host: names the host", /has not given invokr access to 192\.168\.1\.50:8765/.test(text), text.slice(0, 80));
+  check("denied host: does not blame the server", !/Cannot reach/.test(text));
 
   const failed = results.filter((result) => !result).length;
   console.log(`\n${results.length - failed}/${results.length} passed`);

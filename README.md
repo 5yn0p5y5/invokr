@@ -145,6 +145,14 @@ Open the extension's settings (click the toolbar icon → **Settings**) and past
 
 Press **Test connection**. It should say *Server reachable and ready.*
 
+> **Serving from another machine?** Set **Server URL** to that machine's address
+> (for example `http://192.168.1.50:8765`) and press **Save**. Firefox asks once
+> whether invokr may access that host; approve it, then press **Test
+> connection**. The grant covers that one host and can be reviewed or revoked in
+> `about:addons` → invokr → **Permissions**. Only `127.0.0.1` and `localhost`
+> are pre-authorized. The server also has to listen on an address the other
+> machine can reach — see `host` under [Configuration](#configuration).
+
 Where the archive lives is a server setting rather than an extension one — the
 same settings page has an **Archive location** section when you want to move it
 off the default folder. See [the master folder](#the-master-folder).
@@ -245,7 +253,7 @@ by **title and artist**.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `host` / `port` | `127.0.0.1` / `8765` | Where the server listens |
+| `host` / `port` | `127.0.0.1` / `8765` | Where the server listens. Use the machine's LAN IP, or `0.0.0.0` for every interface, to serve other devices |
 | `token` | generated | Shared secret; also goes in the extension settings |
 | `root` | *(unset)* | **The master folder.** Everything below derives from it |
 | `library` | `<root>/library` | Where finished files land; set it only to override `root` |

@@ -359,6 +359,10 @@ function dispatchLike({ action, videoId, tabId, source, title, artists, album, d
 async function handleUnlike(payload) {
   const config = await settings();
   if (!config.token) return;
+  if (!(await InvokrAccess.has(config.serverUrl))) {
+    note("unlike", InvokrAccess.denied(config.serverUrl));
+    return;
+  }
   try {
     const response = await api(
       "/api/unlike",
@@ -378,6 +382,15 @@ async function handleLike(payload) {
     await badge("!", "#b3261e");
     await notify("invokr is not configured", "Open the extension's options and paste the server token.");
     recordServerCall({ path: "/api/review", status: null, detail: "no token configured" });
+    return;
+  }
+
+  // Likes arrive from a page event, not a click on the extension, so the
+  // prompt cannot happen here. Report the missing grant instead of a timeout.
+  if (!(await InvokrAccess.has(config.serverUrl))) {
+    await badge("!", "#b3261e");
+    await notify("invokr: server access not granted", InvokrAccess.denied(config.serverUrl));
+    recordServerCall({ path: "/api/review", status: null, detail: "host access not granted" });
     return;
   }
 
@@ -515,6 +528,12 @@ function watchJob(jobId, label) {
 
     try {
       const config = await settings();
+      if (!(await InvokrAccess.has(config.serverUrl))) {
+        await badge("!", "#b3261e");
+        await notify("invokr: server access not granted", InvokrAccess.denied(config.serverUrl));
+        note("watchJob", "host access not granted");
+        return;
+      }
       const response = await fetch(`${config.serverUrl}/api/jobs/${jobId}`, {
         headers: { Authorization: `Bearer ${config.token}` },
       });

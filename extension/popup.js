@@ -35,6 +35,15 @@
   }
 
   async function api(path, options = {}) {
+    // The popup opens without a click, so it cannot ask for the origin; it can
+    // only explain when the grant is missing. Settings/Save is where the prompt
+    // lives.
+    if (!(await InvokrAccess.has(config.serverUrl))) {
+      const error = new Error(InvokrAccess.denied(config.serverUrl));
+      error.permissionDenied = true;
+      throw error;
+    }
+
     const response = await fetch(`${config.serverUrl}${path}`, {
       ...options,
       headers: {
@@ -713,7 +722,12 @@
       renderReview(await api(`/api/review/${data.reviews[0].reviewId}`));
     } catch (error) {
       await clearBadge();
-      message(`Cannot reach ${config.serverUrl}\n\n${error.message}`, "error");
+      message(
+        error.permissionDenied
+          ? error.message
+          : `Cannot reach ${config.serverUrl}\n\n${error.message}`,
+        "error"
+      );
     }
   }
 

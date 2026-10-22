@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "invokr",
-  "version": "0.7.0",
+  "version": "0.7.2",
   "description": "Send the song you like on YouTube Music to your own archive, tagged with catalogue metadata.",
   "browser_specific_settings": {
     "gecko": {
@@ -24,8 +24,12 @@
     "http://localhost/*",
     "*://music.youtube.com/*"
   ],
+  "optional_host_permissions": [
+    "http://*/*"
+  ],
   "background": {
     "scripts": [
+      "server-access.js",
       "background.js"
     ]
   },

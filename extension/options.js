@@ -30,8 +30,22 @@ async function save() {
     reviewOpen: $("reviewOpen").value,
     autoOpenPopup: $("autoOpenPopup").checked,
   };
+
+  // Ask for the server's origin before the first await. Firefox only shows the
+  // permissions prompt inside the click that brought us here, and saving is the
+  // natural moment to ask. Localhost is already granted, so the default setup
+  // never prompts; a server on the LAN asks once for that one host.
+  const granted = await InvokrAccess.request(values.serverUrl);
+
   await browser.storage.local.set(values);
-  $("status").textContent = "Saved.";
+
+  if (granted) {
+    $("status").className = "";
+    $("status").textContent = "Saved.";
+  } else {
+    $("status").className = "bad";
+    $("status").textContent = InvokrAccess.denied(values.serverUrl);
+  }
   return values;
 }
 
@@ -55,6 +69,14 @@ async function testConnection() {
   const values = await save();
   $("status").className = "";
   $("status").textContent = "Contacting the server…";
+
+  // A denied prompt and a dead server look identical to fetch, so say which
+  // one this is before trying.
+  if (!(await InvokrAccess.has(values.serverUrl))) {
+    $("status").className = "bad";
+    $("status").textContent = InvokrAccess.denied(values.serverUrl);
+    return;
+  }
 
   let response;
   try {
@@ -113,6 +135,12 @@ async function configRequest(method, body) {
   const serverUrl =
     $("serverUrl").value.trim().replace(/\/+$/, "") || DEFAULTS.serverUrl;
   const token = $("token").value.trim();
+
+  // These buttons are user actions too, so this can grant a server address
+  // that was typed but not saved yet.
+  if (!(await InvokrAccess.request(serverUrl))) {
+    throw new Error(InvokrAccess.denied(serverUrl));
+  }
 
   const response = await fetch(`${serverUrl}/api/config`, {
     method,
@@ -202,6 +230,18 @@ async function runDiagnostics() {
   out.push(line("version", manifest.version));
   out.push(line("permissions", (manifest.permissions || []).join(", ")));
   out.push(line("host permissions", (manifest.host_permissions || []).join(", ")));
+  out.push(
+    line(
+      "optional hosts",
+      (manifest.optional_host_permissions || []).join(", ") || "(none)"
+    )
+  );
+  try {
+    const granted = await browser.permissions.getAll();
+    out.push(line("granted hosts", (granted.origins || []).join(", ") || "(none)"));
+  } catch (error) {
+    out.push(line("granted hosts", error.message));
+  }
 
   out.push("");
   out.push("=== background page ===");
