@@ -150,8 +150,11 @@ Press **Test connection**. It should say *Server reachable and ready.*
 > whether invokr may access that host; approve it, then press **Test
 > connection**. The grant covers that one host and can be reviewed or revoked in
 > `about:addons` → invokr → **Permissions**. Only `127.0.0.1` and `localhost`
-> are pre-authorized. The server also has to listen on an address the other
-> machine can reach — see `host` under [Configuration](#configuration).
+> are pre-authorized. The extension also opts out of Manifest V3's default
+> `upgrade-insecure-requests` CSP, which would otherwise rewrite the plain-HTTP
+> request to HTTPS before it leaves Firefox. The server also has to listen on an
+> address the other machine can reach — see `host` under
+> [Configuration](#configuration).
 
 Where the archive lives is a server setting rather than an extension one — the
 same settings page has an **Archive location** section when you want to move it
