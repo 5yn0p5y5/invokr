@@ -20,6 +20,8 @@ rapidfuzz>=3.9
 mutagen>=1.47
 
 # These two break whenever YouTube changes something. Keep them current:
-#   python -m pip install --upgrade yt-dlp ytmusicapi
-yt-dlp>=2026.8.19
+#   python -m pip install --upgrade "yt-dlp[default]" ytmusicapi
+# The `default` extra brings in yt-dlp-ejs, the challenge scripts yt-dlp needs
+# alongside a JavaScript runtime (Deno).
+yt-dlp[default]>=2026.8.19
 ytmusicapi>=1.11

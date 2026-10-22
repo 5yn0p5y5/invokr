@@ -296,9 +296,13 @@ server* to see the current layout, type the folder, **Apply on server**. The
 server validates before changing anything: the path has to be absolute, the drive
 or share has to be reachable, and the folder has to be creatable and writable —
 so a typo, or a NAS that is not mounted, is refused with a reason instead of
-being silently accepted. Editing `root` in `server/config.json` by hand works
-too, and both routes retire the per-path overrides above, which would otherwise
-quietly outrank `root`.
+being silently accepted.
+
+Editing `root` in `server/config.json` by hand works too, but **restart the
+server afterwards**: the config is read once at startup, so a running process
+keeps the old value until it is restarted. Unlike the settings page, a hand edit
+does not clear the per-path overrides above — leave `library`, `db`, and
+`log_dir` empty when you set `root`, or they will quietly outrank it.
 
 Pointing the server at a new folder never moves or deletes files. If the new
 folder has no database yet and the old one does, the existing index is **copied**
@@ -452,9 +456,22 @@ recorded before the move, once: `python import_library.py --rebase-from
 "/old/path/to/library"`. See [the master folder](#the-master-folder).
 
 **`js_runtime` warning.**
-yt-dlp warns that YouTube extraction without a JavaScript runtime is deprecated.
-Downloads work without one, but installing
-[Deno](https://deno.land/) removes the risk of some formats going missing.
+yt-dlp solves YouTube's JavaScript challenges with an external runtime, and it
+only enables **Deno** by default. Without one, downloads work today but some
+formats can go missing. On Ubuntu, install Deno system-wide so the service finds
+it (2.3.0 or newer):
+
+```bash
+sudo apt install -y curl unzip
+curl -fsSL https://deno.land/install.sh | sudo env DENO_INSTALL=/usr/local sh
+deno --version
+```
+
+Node 22+ only works if yt-dlp is told to use it (`--js-runtimes node`), which
+this server does not pass, and Bun support is deprecated, so neither is a
+drop-in substitute. Also keep the EJS challenge scripts installed:
+`pip install -U "yt-dlp[default]"` — the plain `yt-dlp` package does not pull in
+`yt-dlp-ejs`, and without it a JS runtime has nothing to run.
 
 ---
 

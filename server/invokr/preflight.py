@@ -55,14 +55,25 @@ def check_ffmpeg() -> dict:
 
 def check_js_runtime() -> dict:
     """
-    yt-dlp warns that YouTube extraction without a JS runtime is deprecated.
+    yt-dlp needs a JavaScript runtime to solve YouTube's challenges.
 
-    Downloads currently succeed without one, so this is a warning, not a gate.
+    Only Deno is enabled by default. Node (22+) and Bun require an explicit
+    ``--js-runtimes`` option, which this server does not pass, so reporting
+    Node as healthy here would be a false positive: the check is whether
+    yt-dlp can actually use what is installed.
     """
     found = [name for name in ("deno", "node", "bun") if shutil.which(name)]
-    if found:
+    if "deno" in found:
         return _result(
             "js_runtime", True, f"found: {', '.join(found)}", severity=RECOMMENDED
+        )
+    if found:
+        return _result(
+            "js_runtime",
+            False,
+            f"found: {', '.join(found)} — yt-dlp only enables Deno by default; "
+            "install Deno for full YouTube support",
+            severity=RECOMMENDED,
         )
     return _result(
         "js_runtime",
