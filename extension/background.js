@@ -142,21 +142,37 @@ function api(path, body, { serverUrl, token }) {
  * `kind` is carried into the diagnostics so a future body-shape change is
  * visible instead of guessable.
  */
-function decodeRequestBody(requestBody) {
+async function decodeRequestBody(requestBody) {
   if (!requestBody) return { kind: "absent", text: "" };
   if (requestBody.error) return { kind: "error", text: "" };
 
   const chunks = requestBody.raw;
   if (chunks && chunks.length) {
-    let text = "";
+    const parts = [];
+    let total = 0;
     for (const chunk of chunks) {
       if (!chunk) continue;
       if (chunk.file) return { kind: "file", text: "" };
       if (chunk.bytes) {
-        text += new TextDecoder("utf-8").decode(new Uint8Array(chunk.bytes));
+        const bytes = new Uint8Array(chunk.bytes);
+        parts.push(bytes);
+        total += bytes.length;
       }
     }
-    if (text) return { kind: "raw", text };
+    if (total) {
+      const bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const part of parts) {
+        bytes.set(part, offset);
+        offset += part.length;
+      }
+      // YouTube Music compresses these bodies with gzip. The kind is carried
+      // into the diagnostics so a future encoding change is visible.
+      return {
+        kind: InvokrBody.isGzip(bytes) ? "gzip" : "raw",
+        text: await InvokrBody.text(bytes),
+      };
+    }
   }
 
   const form = requestBody.formData || requestBody.lenientFormData;
@@ -249,56 +265,10 @@ function installWebRequestHook() {
 
     browser.webRequest.onBeforeRequest.addListener(
       (details) => {
-        try {
-          if (details.method !== "POST") return;
-          stats.requestsSeen += 1;
-
-          const isLike = details.url.includes("/like/");
-
-          // Record every innertube POST, but only decode the body of a like
-          // request. If a like is ever missed, the log shows whether the
-          // request was sent at all, what the body looked like, and what we
-          // managed to read out of it.
-          const entry = {
-            at: Date.now(),
-            path: details.url.replace(/^https?:\/\/[^/]+/, "").split("?")[0],
-            like: isLike,
-            videoId: null,
-          };
-
-          if (!isLike) {
-            stats.recentRequests.push(entry);
-            if (stats.recentRequests.length > 25) stats.recentRequests.shift();
-            return;
-          }
-
-          const body = decodeRequestBody(details.requestBody);
-          const videoId = videoIdFromBodyText(body.text);
-          entry.videoId = videoId || null;
-          entry.body = body.kind;
-          entry.preview = body.text.slice(0, 160);
-          stats.recentRequests.push(entry);
-          if (stats.recentRequests.length > 25) stats.recentRequests.shift();
-
-          // /like/dislike is a thumbs-down: not our business.
-          if (details.url.includes("/like/dislike")) return;
-
-          if (!videoId) {
-            stats.requestsUnparsed += 1;
-            recordDispatch({
-              action: "?",
-              videoId: null,
-              source: "webRequest",
-              outcome: `no videoId in body (${body.kind})`,
-            });
-            return;
-          }
-
-          const action = details.url.includes("/like/remove") ? "unlike" : "like";
-          dispatchLike({ action, videoId, tabId: details.tabId, source: "webRequest" });
-        } catch (error) {
-          note("webRequest", error);
-        }
+        // The body may be gzip, so decoding is async. The listener itself must
+        // stay synchronous: webRequest ignores a returned promise, and this is
+        // not a blocking listener.
+        handleWebRequest(details).catch((error) => note("webRequest", error));
       },
       { urls: ["*://music.youtube.com/youtubei/v1/*"] },
       ["requestBody"]
@@ -309,6 +279,54 @@ function installWebRequestHook() {
     stats.webRequestAvailable = false;
     note("webRequest", error);
   }
+}
+
+async function handleWebRequest(details) {
+  if (details.method !== "POST") return;
+  stats.requestsSeen += 1;
+
+  const isLike = details.url.includes("/like/");
+
+  // Record every innertube POST, but only decode the body of a like request.
+  // If a like is ever missed, the log shows whether the request was sent at
+  // all, what the body looked like, and what we managed to read out of it.
+  const entry = {
+    at: Date.now(),
+    path: details.url.replace(/^https?:\/\/[^/]+/, "").split("?")[0],
+    like: isLike,
+    videoId: null,
+  };
+
+  if (!isLike) {
+    stats.recentRequests.push(entry);
+    if (stats.recentRequests.length > 25) stats.recentRequests.shift();
+    return;
+  }
+
+  const body = await decodeRequestBody(details.requestBody);
+  const videoId = videoIdFromBodyText(body.text);
+  entry.videoId = videoId || null;
+  entry.body = body.kind;
+  entry.preview = body.text.slice(0, 160);
+  stats.recentRequests.push(entry);
+  if (stats.recentRequests.length > 25) stats.recentRequests.shift();
+
+  // /like/dislike is a thumbs-down: not our business.
+  if (details.url.includes("/like/dislike")) return;
+
+  if (!videoId) {
+    stats.requestsUnparsed += 1;
+    recordDispatch({
+      action: "?",
+      videoId: null,
+      source: "webRequest",
+      outcome: `no videoId in body (${body.kind})`,
+    });
+    return;
+  }
+
+  const action = details.url.includes("/like/remove") ? "unlike" : "like";
+  dispatchLike({ action, videoId, tabId: details.tabId, source: "webRequest" });
 }
 
 // ------------------------------------------------------------------ actions

@@ -84,11 +84,11 @@
   }
 
   /**
-   * Bodies arrive as strings, `URLSearchParams`, `FormData`, `Blob` or
-   * `ArrayBuffer`. Only the first three can be read synchronously; the rest are
-   * reported with no id, and the DOM signals cover them.
+   * Bodies arrive as strings, `URLSearchParams`, `FormData`, `Blob` or typed
+   * arrays. YouTube Music now hands fetch/XHR a gzip-compressed body, so the
+   * byte paths are asynchronous; `report` therefore is too.
    */
-  function bodyText(body) {
+  async function bodyText(body) {
     if (body === null || body === undefined) return "";
     if (typeof body === "string") return body;
     try {
@@ -103,12 +103,26 @@
         return parts.join("&");
       }
     } catch (_) {
-      /* cross-realm object; nothing readable */
+      /* cross-realm object; try the byte paths below */
     }
-    return "";
+
+    let bytes = null;
+    try {
+      if (typeof Blob !== "undefined" && body instanceof Blob) {
+        bytes = new Uint8Array(await body.arrayBuffer());
+      } else if (body instanceof ArrayBuffer) {
+        bytes = new Uint8Array(body);
+      } else if (ArrayBuffer.isView(body)) {
+        bytes = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+      }
+    } catch (_) {
+      bytes = null;
+    }
+    if (!bytes) return "";
+    return InvokrBody.text(bytes);
   }
 
-  function report(url, body) {
+  async function report(url, body) {
     let action;
     try {
       action = actionFor(url);
@@ -119,7 +133,7 @@
 
     let videoId = null;
     try {
-      videoId = videoIdFromBody(bodyText(body));
+      videoId = videoIdFromBody(await bodyText(body));
     } catch (_) {
       videoId = null;
     }
@@ -193,7 +207,7 @@
             if (body === undefined && input && typeof input === "object" && "body" in input) {
               body = input.body;
             }
-            report(url, body);
+            report(url, body).catch(() => {});
           }
         } catch (_) {
           /* never let inspection change the request */
@@ -222,7 +236,7 @@
 
     XMLHttpRequest.prototype.send = function (body) {
       try {
-        if (actionFor(this.__invokrUrl)) report(this.__invokrUrl, body);
+        if (actionFor(this.__invokrUrl)) report(this.__invokrUrl, body).catch(() => {});
       } catch (_) {
         /* never let inspection change the request */
       }
